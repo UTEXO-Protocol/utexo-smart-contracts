@@ -1,0 +1,1 @@
+cd ethereum && npm run prettier && npm run prettier:sol

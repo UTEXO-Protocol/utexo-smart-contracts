@@ -1,0 +1,18 @@
+{
+  "extends": "solhint:recommended",
+  "plugins": [],
+  "rules": {
+    "code-complexity": ["warn",20],
+    "function-max-lines": ["warn",200],
+    "max-line-length": ["warn",120],
+    "max-states-count": ["warn",30],
+    "func-visibility": ["warn",{"ignoreConstructors":true}],
+    "compiler-version": ["warn","^0.8"],
+    "reason-string": ["warn",{"maxLength":64}],
+    "constructor-syntax": "warn",
+    "func-param-name-mixedcase": "warn",
+    "modifier-name-mixedcase": "warn",
+    "private-vars-leading-underscore": "warn",
+    "ordering": "warn"
+  }
+}

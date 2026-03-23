@@ -1,0 +1,6 @@
+.idea
+.DS_Store
+target
+*.export
+contracts/.deps
+.vscode

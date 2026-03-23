@@ -1,0 +1,39 @@
+{
+  "name": "hardhat-golden-gate",
+  "scripts": {
+    "clean": "hardhat clean",
+    "coverage": "hardhat coverage",
+    "compile": "hardhat --show-stack-traces --max-memory 8192 compile",
+    "lint": "npx solhint \"contracts/**/*.sol\"",
+    "lint:prettier": "prettier --list-different 'contracts/**/*.sol'",
+    "prettier:sol": "prettier --write 'contracts/**/*.sol'",
+    "prettier": "prettier --write './**/*.ts'",
+    "typechain": "hardhat typechain",
+    "test": "hardhat test",
+    "prepare": "cd .. && husky ./ethereum/.husky && echo 'cd ethereum && npm run prettier && npm run prettier:sol' > ethereum/.husky/pre-commit"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-chai-matchers": "^2.0.7",
+    "@nomicfoundation/hardhat-ethers": "^3.0.8",
+    "@nomicfoundation/hardhat-network-helpers": "^1.0.11",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/hardhat-upgrades": "^3.2.1",
+    "@typechain/ethers-v6": "^0.5.1",
+    "@types/mocha": "^9.1.1",
+    "@types/node": "^18.19.26",
+    "hardhat": "^2.14.0",
+    "husky": "^9.1.5",
+    "lint-staged": "^15.2.10",
+    "prettier": "^2.7.1",
+    "prettier-plugin-solidity": "^1.0.0-beta.19",
+    "ts-node": "^10.8.2",
+    "typescript": "^4.7.4"
+  },
+  "dependencies": {
+    "@nomicfoundation/hardhat-verify": "^2.0.9",
+    "@openzeppelin/contracts": "^5.0.2",
+    "@openzeppelin/contracts-upgradeable": "^4.7.0",
+    "chai": "^4.3.7",
+    "dotenv": "^16.0.1"
+  }
+}

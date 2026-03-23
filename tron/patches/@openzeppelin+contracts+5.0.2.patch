@@ -1,0 +1,29 @@
+diff --git a/node_modules/@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol b/node_modules/@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol
+index 8836693..4c5a9de 100644
+--- a/node_modules/@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol
++++ b/node_modules/@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol
+@@ -28,11 +28,10 @@ library MessageHashUtils {
+      * See {ECDSA-recover}.
+      */
+     function toEthSignedMessageHash(bytes32 messageHash) internal pure returns (bytes32 digest) {
+-        /// @solidity memory-safe-assembly
+-        assembly {
+-            mstore(0x00, "\x19Ethereum Signed Message:\n32") // 32 is the bytes-length of messageHash
+-            mstore(0x1c, messageHash) // 0x1c (28) is the length of the prefix
+-            digest := keccak256(0x00, 0x3c) // 0x3c is the length of the prefix (0x1c) + messageHash (0x20)
++        assembly ("memory-safe") {
++            mstore(0x00, "\x19TRON Signed Message:\n32") // 24 bytes prefix
++            mstore(0x18, messageHash) // 0x18 (24) is the length of the prefix
++            digest := keccak256(0x00, 0x38) // 0x38 is the length of the prefix (0x18) + messageHash (0x20)
+         }
+     }
+ 
+@@ -48,7 +47,7 @@ library MessageHashUtils {
+      */
+     function toEthSignedMessageHash(bytes memory message) internal pure returns (bytes32) {
+         return
+-            keccak256(bytes.concat("\x19Ethereum Signed Message:\n", bytes(Strings.toString(message.length)), message));
++            keccak256(bytes.concat("\x19TRON Signed Message:\n", bytes(Strings.toString(message.length)), message));
+     }
+ 
+     /**
