@@ -4,10 +4,10 @@ import { ZERO_ADDRESS, getNetworkScanUrl } from './util';
 task('deploy-proxies', 'Deploy a proxy contract')
     .addParam('bridge', 'Address of the bridged contract', ZERO_ADDRESS, types.string)
     .addOptionalParam('admin', 'Address of the proxy admin', undefined, types.string)
-    .addOptionalParam('systemsigner', 'Address of the proxy admin', undefined, types.string)
+    .addOptionalParam('commissioncollector', 'Address of the commission collector', ZERO_ADDRESS, types.string)
     .setAction(async (taskArgs, hre) => {
         const { ethers, run } = hre;
-        let { bridge, admin, systemsigner } = taskArgs;
+        let { bridge, admin, commissioncollector } = taskArgs;
         const [deployer] = await ethers.getSigners();
         console.log('----------------------------------------------------');
         console.log(`Deployer account: ${deployer.address}`);
@@ -15,13 +15,6 @@ task('deploy-proxies', 'Deploy a proxy contract')
             'Deployer balance:',
             (await ethers.provider.getBalance(deployer.address)).toString()
         );
-
-        if (!systemsigner) {
-            systemsigner = deployer.address;
-            console.log(
-                `No systemsigner provided, default signer (${systemsigner}) will be used...`
-            );
-        }
 
         let proxyAdmin;
         if (admin === undefined) {
@@ -62,15 +55,15 @@ task('deploy-proxies', 'Deploy a proxy contract')
         //
         // INITIALIZING BRIDGE CONTRACT VIA PROXY
         //
-        console.log(`Initializing with Bridge address...`);
+        console.log(`Initializing Bridge contract via proxy...`);
         const bridgeContract = await ethers.getContractAt(
             'Bridge',
             await transparentProxy.getAddress()
         );
-        const initializeTx = await bridgeContract.initialize(systemsigner);
+        const initializeTx = await bridgeContract.initialize(commissioncollector);
         await initializeTx.wait();
         console.log(
-            `Initialized bridge contract via proxy at ${await transparentProxy.getAddress()} with signer ${systemsigner}`
+            `Initialized bridge contract via proxy at ${await transparentProxy.getAddress()} with commission collector ${commissioncollector}`
         );
         console.log('----------------------------------------------------');
 

@@ -23,6 +23,36 @@ pragma solidity ^0.8.20;
 interface IMultisigProxy {
 
     // =========================================================================
+    // Errors
+    // =========================================================================
+
+    error ZeroBridge();
+    error NoSigners();
+    error InvalidThreshold();
+    error ZeroCommissionRecipient();
+    error TimelockTooLong();
+    error Expired();
+    error CallDataTooShort();
+    error SelectorNotAllowed();
+    error InvalidNonce();
+    error NotPending();
+    error TimelockActive();
+    error ProposalExpired();
+    error DataMismatch();
+    error DeadlineTooFar();
+    error ProposalExists();
+    error IndexOutOfRange();
+    error BitmapOutOfRange();
+    error BelowThreshold();
+    error SigCountMismatch();
+    error InvalidSignature();
+    error ZeroAddressSigner();
+    error DuplicateSigner();
+    error CallFailed();
+    error UnknownOperationType();
+    error ZeroRecipient();
+
+    // =========================================================================
     // Types
     // =========================================================================
 
@@ -234,6 +264,17 @@ interface IMultisigProxy {
     // =========================================================================
     // View
     // =========================================================================
+
+    /// @notice Verify that `signature` over `digest` was produced by the enclave signer at `signerIndex`.
+    /// @param digest The EIP-191 message hash that was signed.
+    /// @param signature The ECDSA signature bytes.
+    /// @param signerIndex Index into the enclave signers array.
+    /// @return True if the recovered address matches _enclaveSigners[signerIndex].
+    function verifyEnclaveSignature(
+        bytes32 digest,
+        bytes calldata signature,
+        uint256 signerIndex
+    ) external view returns (bool);
 
     function getNonce(bytes4 selector) external view returns (uint256);
     function bridge() external view returns (address);

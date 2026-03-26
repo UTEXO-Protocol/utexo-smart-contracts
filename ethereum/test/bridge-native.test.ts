@@ -1,25 +1,25 @@
 import { ethers } from 'hardhat';
 import { expect } from 'chai';
-import { Wallet } from 'ethers';
-import {
-    Bridge,
-    MockContractV1,
-    BridgeContractProxyAdmin,
-    TransparentProxy,
-} from '../typechain-types';
+import { HDNodeWallet, Interface } from 'ethers';
+import { Bridge, MultisigProxy } from '../typechain-types';
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { getCurrentTimeFromNetwork, signMessage } from './util';
+import { getCurrentTimeFromNetwork } from './util';
+import { signFundsInNative } from './helpers/bridge-setup';
+import {
+    buildBitmapAndSignatures,
+    BridgeOperationTypes,
+} from './helpers/multisig-helpers';
+import { TypedDataDomain } from 'ethers';
 
 describe('Bridge Native Coin test', function () {
     let bridgeContract: Bridge;
+    let multisigProxy: MultisigProxy;
+    let teeSigner: HDNodeWallet;
+    let domain: TypedDataDomain;
     let user1: SignerWithAddress;
     let commissionCollector: SignerWithAddress;
     let chainId: bigint;
 
-    // System wallet used for signing messages
-    const systemWallet = new Wallet(
-        '855d9081c7cc3d234fe5f333156ba6efa612be8e0befb14338bacd13a8a90300'
-    );
     const amountToTransfer = ethers.parseEther('1000');
     const testCommission = ethers.parseEther('140');
     const bridgeInTransactionId = 111;
@@ -27,39 +27,19 @@ describe('Bridge Native Coin test', function () {
     const destinationChain = 'Solana';
     const destinationAddress = '4zXwdbUDWo1S5AP2CEfv4bridgeContractzAPRds5PQUG1dyqLLvib2xu';
 
-    // Types used for message signing in the `bridgeInNative` function
-    const TYPES_FOR_SIGNATURE_BRIDGE_IN_NATIVE = [
-        'address',
-        'address',
-        'uint256',
-        'string',
-        'string',
-        'uint256',
-        'uint256',
-        'uint256',
-        'uint256',
-    ];
-
-    // Function to simulate a user bridging in native currency!
+    // Function to simulate a user bridging in native currency
     async function bridgeInNative(nonce: number, commission = testCommission) {
-        const deadline = (await getCurrentTimeFromNetwork()) + 84_000; // Set deadline for the transaction
-        const signatureBridgeInNative = await signMessage(
-            TYPES_FOR_SIGNATURE_BRIDGE_IN_NATIVE,
-            [
-                await user1.getAddress(),
-                await bridgeContract.getAddress(),
-                commission,
-                destinationChain,
-                destinationAddress,
-                deadline,
-                nonce,
-                bridgeInTransactionId,
-                chainId,
-            ],
-            systemWallet
-        );
+        const deadline = (await getCurrentTimeFromNetwork()) + 84_000;
+        const signature = await signFundsInNative(teeSigner, domain, {
+            sender: await user1.getAddress(),
+            commission,
+            destinationChain,
+            destinationAddress,
+            deadline,
+            nonce,
+            transactionId: bridgeInTransactionId,
+        });
 
-        // Call the `fundsInNative` function on the `Bridge` contract
         return bridgeContract.connect(user1).fundsInNative(
             {
                 commission,
@@ -69,55 +49,105 @@ describe('Bridge Native Coin test', function () {
                 nonce,
                 transactionId: bridgeInTransactionId,
             },
-            signatureBridgeInNative,
-            { value: amountToTransfer } // Transfer value sent with the transaction
+            signature,
+            0, // signerIndex
+            { value: amountToTransfer }
         );
     }
 
-    // Helper function to calculate the total commission and the amount to return after commission is deducted
+    // Helper to call fundsOutNative via MultisigProxy.execute() with TEE signatures
+    async function fundsOutNative(
+        recipient: string,
+        amount: bigint,
+        commission: bigint,
+        transactionId: number,
+        sourceChain: string,
+        sourceAddress: string
+    ) {
+        const bridgeIface = new Interface([
+            'function fundsOutNative(address payable,uint256,uint256,uint256,string,string)',
+        ]);
+        const callData = bridgeIface.encodeFunctionData('fundsOutNative', [
+            recipient,
+            amount,
+            commission,
+            transactionId,
+            sourceChain,
+            sourceAddress,
+        ]);
+        const selector = callData.slice(0, 10) as `0x${string}`;
+        const nonce = await multisigProxy.getNonce(selector);
+        const deadline = (await getCurrentTimeFromNetwork()) + 84_000;
+
+        const { bitmap, signatures } = await buildBitmapAndSignatures(
+            [teeSigner],
+            [0],
+            domain,
+            BridgeOperationTypes,
+            { selector, callData, nonce, deadline }
+        );
+
+        return multisigProxy.execute(callData, nonce, deadline, bitmap, signatures);
+    }
+
+    // Helper to calculate total commission and amount to return
     function getAmountToReturnAndTotalCommission() {
         const totalCommission = testCommission;
         const amountToReturn = amountToTransfer - totalCommission;
-
         return [totalCommission, amountToReturn];
     }
 
     // Setup before running tests
     this.beforeAll(async () => {
-        // @ts-ignore
-        // Get signers
-        [user1, commissionCollector] = (await ethers.getSigners()) as SignerWithAddress;
+        [, user1, commissionCollector] = (await ethers.getSigners()) as SignerWithAddress[];
 
-        // Get contracts factories
+        teeSigner = ethers.Wallet.createRandom();
+        const federationSigner = ethers.Wallet.createRandom();
+
+        // Deploy Bridge via proxy
         const BridgeContract = await ethers.getContractFactory('Bridge');
-        const BridgeContractProxyAdmin = await ethers.getContractFactory(
-            'BridgeContractProxyAdmin'
-        );
+        const BridgeContractProxyAdmin = await ethers.getContractFactory('BridgeContractProxyAdmin');
         const TransparentProxy = await ethers.getContractFactory('TransparentProxy');
         const MockContractV1 = await ethers.getContractFactory('MockContractV1');
 
-        // Deploy contracts
-        const bridgeContractImplementation = (await BridgeContract.deploy()) as Bridge;
-        const mockContractV1 = (await MockContractV1.deploy()) as MockContractV1;
-        const bridgeContractProxyAdmin =
-            (await BridgeContractProxyAdmin.deploy()) as BridgeContractProxyAdmin;
-        const transparentProxy = (await TransparentProxy.deploy(
-            await mockContractV1.getAddress()
-        )) as TransparentProxy;
+        const bridgeImpl = await BridgeContract.deploy();
+        const mockV1 = await MockContractV1.deploy();
+        const proxyAdmin = await BridgeContractProxyAdmin.deploy();
+        const transparentProxy = await TransparentProxy.deploy(await mockV1.getAddress());
 
-        await transparentProxy.changeAdmin(await bridgeContractProxyAdmin.getAddress());
-        // Update TransparentProxy by specifying a new implementation - a deployed Bridge contract
-        const upgradeTx = await bridgeContractProxyAdmin.upgrade(
-            await transparentProxy.getAddress(),
-            await bridgeContractImplementation.getAddress()
-        );
-        await upgradeTx.wait(1); // Waiting for confirmation of the update transaction
+        await transparentProxy.changeAdmin(await proxyAdmin.getAddress());
+        await proxyAdmin.upgrade(await transparentProxy.getAddress(), await bridgeImpl.getAddress());
 
         bridgeContract = await ethers.getContractAt('Bridge', await transparentProxy.getAddress());
-        await bridgeContract.initialize(await systemWallet.getAddress());
+        await bridgeContract.initialize(ethers.ZeroAddress);
 
         chainId = await bridgeContract.getChainId();
+
+        // Set commission collector while deployer is still the owner
         await bridgeContract.setCommissionCollector(await commissionCollector.getAddress());
+
+        // Deploy MultisigProxy
+        const MultisigFactory = await ethers.getContractFactory('MultisigProxy');
+        multisigProxy = await MultisigFactory.deploy(
+            await bridgeContract.getAddress(),
+            [teeSigner.address],
+            1, // enclave threshold
+            [federationSigner.address],
+            1, // federation threshold
+            await commissionCollector.getAddress(), // commission recipient
+            3600 // timelock duration
+        ) as MultisigProxy;
+        await multisigProxy.waitForDeployment();
+
+        // Transfer Bridge ownership to MultisigProxy
+        await bridgeContract.transferOwnership(await multisigProxy.getAddress());
+
+        domain = {
+            name: 'MultisigProxy',
+            version: '1',
+            chainId,
+            verifyingContract: await multisigProxy.getAddress(),
+        };
     });
 
     it('bridge contract should be deployed with correct values', async () => {
@@ -147,13 +177,13 @@ describe('Bridge Native Coin test', function () {
     });
 
     it('owner should can bridge coin in and out', async () => {
-        const [totalCommission, amountToReturn] = getAmountToReturnAndTotalCommission();
-        const outboundCommission = ethers.parseEther('50'); // Commission for outbound transfer
-        const userReceiveAmount = amountToReturn - outboundCommission; // Amount user actually receives
-        const totalAmountOut = userReceiveAmount + outboundCommission; // Total amount processed
+        const [, amountToReturn] = getAmountToReturnAndTotalCommission();
+        const outboundCommission = ethers.parseEther('50');
+        const userReceiveAmount = amountToReturn - outboundCommission;
+        const totalAmountOut = userReceiveAmount + outboundCommission;
 
         await expect(
-            bridgeContract.fundsOutNative(
+            fundsOutNative(
                 await user1.getAddress(),
                 totalAmountOut,
                 outboundCommission,
@@ -188,10 +218,12 @@ describe('Bridge Native Coin test', function () {
         expect(actualCommission).to.equal(ethers.parseEther('190'));
 
         await expect(
-            bridgeContract.connect(commissionCollector).withdrawNativeCommission(actualCommission)
+            bridgeContract
+                .connect(commissionCollector)
+                .withdrawNativeCommission(actualCommission, await commissionCollector.getAddress())
         )
             .to.emit(bridgeContract, 'WithdrawNativeCommission')
-            .withArgs(actualCommission);
+            .withArgs(actualCommission, await commissionCollector.getAddress());
 
         // Ensure that the commission balance is reset to 0 after the withdrawal
         const commission2 = await bridgeContract.getNativeCommission();
@@ -219,10 +251,10 @@ describe('Bridge Native Coin test', function () {
     });
 
     it('bridgeOutNative with 0 commission', async () => {
-        const outboundCommission = ethers.parseEther('0'); // Commission for outbound transfer
+        const outboundCommission = ethers.parseEther('0');
 
         await expect(
-            bridgeContract.fundsOutNative(
+            fundsOutNative(
                 await user1.getAddress(),
                 amountToTransfer,
                 outboundCommission,

@@ -2,9 +2,32 @@
 
 pragma solidity 0.8.20;
 
-import { BridgeInParams, BridgeInParamsCircle, BridgeInNativeParams, BridgeInERC1155Params } from '../ParamsStructs.sol';
+import { FundsInParams, FundsInCircleParams, FundsInNativeParams } from '../ParamsStructs.sol';
 
 interface IBridge {
+    // =========================================================================
+    // Errors
+    // =========================================================================
+
+    error CommissionGreaterThanAmount();
+    error AlreadyUsedSignature();
+    error ExpiredSignature();
+    error AmountExceedBridgePool();
+    error AmountExceedCommissionPool();
+    error InvalidRecipientAddress();
+    error InvalidTokenAddress();
+    error InvalidDestinationAddress();
+    error InvalidDestinationChain();
+    error InvalidCommissionCollectorAddress();
+    error InvalidCircleContractAddress();
+    error NativeTransferFailed();
+    error InvalidSignature();
+    error RenounceOwnershipBlocked();
+
+    // =========================================================================
+    // Events
+    // =========================================================================
+
     /// @param sender Address who deposit tokens to the bridge
     /// @param nonce Classic nonce parameter to track unique transaction
     /// @param token Token we deposit to the bridge
@@ -75,28 +98,6 @@ interface IBridge {
         string destinationAddress
     );
 
-    /// @param sender Address who deposit tokens to the bridge and from which address we burn these tokens
-    /// @param nonce Classic nonce parameter to track unique transaction
-    /// @param token Token we deposit to the bridge and burn it
-    /// @param tokenId Token Id
-    /// @param amount Amount of this token
-    /// @param stableCommissionPercent Commission percent which is actual on the moment when this event fired
-    /// @param gasCommission Gas commission on the destination chain which is actual when this event fired
-    /// @param destinationChain From what chain we transfer to the recipient
-    /// @param destinationAddress From what address(in the above chain) we transfer to the recipient
-    event BridgeMultiTokenInBurn(
-        address indexed sender,
-        uint256 transactionId,
-        uint256 nonce,
-        address token,
-        uint256 tokenId,
-        uint256 amount,
-        uint256 stableCommissionPercent,
-        uint256 gasCommission,
-        string destinationChain,
-        string destinationAddress
-    );
-
     /// @param recipient Recipient of the tokens
     /// @param token Token we fund out from the bridge
     /// @param amount Amount of this token
@@ -146,31 +147,6 @@ interface IBridge {
         string sourceAddress
     );
 
-    /// @param recipient Recipient of the tokens on which we mint these tokens
-    /// @param tokenId Token Id
-    /// @param amount Amount of minted tokens
-    /// @param transactionId Helper parameter to track
-    /// @param sourceChain From what chain we transfer to the recipient
-    /// @param sourceAddress From what address(in the chain mentioned above) we transfer to the recipient
-    event BridgeMultiTokenMint(
-        address indexed recipient,
-        address tokenAddress,
-        uint256 tokenId,
-        uint256 amount,
-        uint256 transactionId,
-        string sourceChain,
-        string sourceAddress
-    );
-
-    /// @param tokenAddress Address of MultiToken
-    /// @param tokenId Token Id
-    /// @param tokenURI Token URI
-    event BridgeMultiTokenEtch(
-        address indexed tokenAddress,
-        uint256 indexed tokenId,
-        string tokenURI
-    );
-
     /// @param token Token we withdraw from the commission pool
     /// @param amount Amount of this token
     /// @param recipient Address that received the commission
@@ -186,26 +162,30 @@ interface IBridge {
 
     /// @notice Deposit tokens on the bridge to transfer them onto another chain
     function fundsIn(
-        BridgeInParams calldata params,
-        bytes calldata signature
+        FundsInParams calldata params,
+        bytes calldata signature,
+        uint256 signerIndex
     ) external;
 
     /// @notice Deposit tokens on the bridge to transfer them onto another chain
     function fundsInCircle(
-        BridgeInParamsCircle calldata params,
-        bytes calldata signature
+        FundsInCircleParams calldata params,
+        bytes calldata signature,
+        uint256 signerIndex
     ) external;
 
     /// @notice Deposit coin on the bridge to transfer them onto another chain
     function fundsInNative(
-        BridgeInNativeParams calldata params,
-        bytes calldata signature
+        FundsInNativeParams calldata params,
+        bytes calldata signature,
+        uint256 signerIndex
     ) external payable;
 
     /// @notice Deposit tokens on the bridge to transfer them onto another chain. Burn these tokens to mint them on another chain eventually
     function fundsInBurn(
-        BridgeInParams calldata params,
-        bytes calldata signature
+        FundsInParams calldata params,
+        bytes calldata signature,
+        uint256 signerIndex
     ) external;
 
     /// @notice Withdraw tokens from the bridge. Can be initiated only by the owner
@@ -239,30 +219,6 @@ interface IBridge {
         string calldata sourceChain,
         string calldata sourceAddress
     ) external;
-
-    /// @notice Send ERC1155 tokens to user using bridge - mint them to the address if token with given id exists. Can be initiated only by the owner
-    function multiTokenMint(
-        address recipient,
-        address token,
-        uint256 tokenId,
-        uint256 amount,
-        uint256 transactionId,
-        string calldata sourceChain,
-        string calldata sourceAddress
-    ) external;
-
-    /// @notice Etch new multiToken with id and tokenURI. Can be initiated only by the owner
-    function multiTokenEtch(
-        address tokenAddress,
-        uint256 tokenId,
-        string memory tokenURI
-    ) external;
-
-    /// @notice Deposit tokens on the bridge to transfer them onto another chain
-    function fundsInMultiToken(
-        BridgeInERC1155Params calldata params,
-        bytes calldata signature
-    ) external payable;
 
     /// @notice Withdraw commission from the collected pool by the specified token
     /// @param recipient Address to receive the withdrawn commission

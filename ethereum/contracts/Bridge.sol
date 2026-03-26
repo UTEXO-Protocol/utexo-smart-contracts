@@ -5,64 +5,71 @@ pragma solidity 0.8.20;
 import { OwnableUpgradeable } from '@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol';
 import { SafeERC20, IERC20 } from '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
 import { PausableUpgradeable } from '@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol';
-import { SignatureVerifyUpgradable } from './signature/SignatureVerifyUpgradable.sol';
-import { Errors } from './Errors.sol';
+
 import { ITokenMessenger } from './interfaces/ITokenMessenger.sol';
+import { IMultisigProxy } from './interfaces/IMultisigProxy.sol';
 import { FungibleToken } from './FungibleToken.sol';
-import { MultiToken } from './MultiToken.sol';
-import { ERC1155Holder } from '@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol';
-import { BridgeInParams, BridgeInParamsCircle, BridgeInNativeParams, BridgeInERC1155Params } from './ParamsStructs.sol';
+import { FundsInParams, FundsInCircleParams, FundsInNativeParams } from './ParamsStructs.sol';
 import { IBridge } from './interfaces/IBridge.sol';
 
 contract Bridge is
     IBridge,
     PausableUpgradeable,
-    OwnableUpgradeable,
-    SignatureVerifyUpgradable,
-    ERC1155Holder
+    OwnableUpgradeable
 {
     using SafeERC20 for IERC20;
 
-    // Deprecated: these variables are no longer used since commission logic
-    // was moved to the backend. They must remain in storage to preserve the
-    // contract’s upgradeability and avoid breaking the storage layout.
-    uint16 private constant _HUNDRED_PERCENT = 10_000;
-    uint32 private constant _MAX_STABLE_COMMISSION_PERCENT = 90_00;
-    uint32 private _stableCommissionPercent = 4_00;
-
-    address private _circleContract =
-        0xD0C3da58f55358142b8d3e06C1C30c5C6114EFE8;
+    address private _circleContract;
     address private _commissionCollector;
 
     mapping(uint256 => bool) private _usedNonces;
     mapping(address => uint256) private _commissionPools;
     uint256 private _nativeCommission;
 
+    // =========================================================================
+    // EIP-712 type hashes for fundsIn signatures
+    // =========================================================================
+
+    bytes32 private constant _FUNDS_IN_TYPEHASH = keccak256(
+        'FundsIn(address sender,address token,uint256 amount,uint256 commission,string destinationChain,string destinationAddress,uint256 deadline,uint256 nonce,uint256 transactionId)'
+    );
+
+    bytes32 private constant _FUNDS_IN_NATIVE_TYPEHASH = keccak256(
+        'FundsInNative(address sender,uint256 commission,string destinationChain,string destinationAddress,uint256 deadline,uint256 nonce,uint256 transactionId)'
+    );
+
+    bytes32 private constant _FUNDS_IN_CIRCLE_TYPEHASH = keccak256(
+        'FundsInCircle(address sender,address token,uint256 amount,uint256 commission,uint32 destinationChain,bytes32 destinationAddress,uint256 deadline,uint256 nonce,uint256 transactionId)'
+    );
+
     /**
      * @dev Throws if called by any account other than the commission collector.
      */
     modifier onlyCommissionCollector() {
         if (_msgSender() != _commissionCollector) {
-            revert(Errors.INVALID_COMMISSION_COLLECTOR_ADDRESS);
+            revert InvalidCommissionCollectorAddress();
         }
         _;
     }
 
-    function initialize(address signer) public initializer {
+    function initialize(address commissionCollector_) public initializer {
         __Pausable_init();
         __Ownable_init();
         transferOwnership(_msgSender());
-        signatureVerifyInit(signer);
         _circleContract = 0xD0C3da58f55358142b8d3e06C1C30c5C6114EFE8;
+        if (commissionCollector_ != address(0)) {
+            _commissionCollector = commissionCollector_;
+        }
     }
 
     /// @notice Deposit tokens on the bridge to transfer them onto another chain
     /// @dev Deposit tokens on the bridge to transfer them onto another chain
     function fundsIn(
-        BridgeInParams calldata params,
-        bytes calldata signature
+        FundsInParams calldata params,
+        bytes calldata signature,
+        uint256 signerIndex
     ) external whenNotPaused {
-        _fundsInCommonOperations(params, signature);
+        _fundsInCommonOperations(params, signature, signerIndex);
 
         IERC20(params.token).safeTransferFrom(
             _msgSender(),
@@ -85,36 +92,33 @@ contract Bridge is
     /// @notice Deposit tokens on the bridge to transfer them onto another chain
     /// @dev Deposit tokens on the bridge to transfer them onto another chain
     function fundsInCircle(
-        BridgeInParamsCircle calldata params,
-        bytes calldata signature
+        FundsInCircleParams calldata params,
+        bytes calldata signature,
+        uint256 signerIndex
     ) external whenNotPaused {
         if (params.token == address(0)) {
-            revert(Errors.INVALID_TOKEN_ADDRESS);
-        }
-
-        if (params.destinationAddress.length == 0) {
-            revert(Errors.INVALID_DESTIONATION_ADDRESS);
+            revert InvalidTokenAddress();
         }
 
         if (params.destinationChain > 10) {
-            revert(Errors.INVALID_DESTIONATION_CHAIN); // up 10 networks
+            revert InvalidDestinationChain(); // up 10 networks
         }
 
         if (params.commission >= params.amount) {
-            revert(Errors.COMMISSION_GREATER_THAN_AMOUNT);
+            revert CommissionGreaterThanAmount();
         }
 
         if (_usedNonces[params.nonce]) {
-            revert(Errors.ALREADY_USED_SIGNATURE);
+            revert AlreadyUsedSignature();
         }
 
         if (block.timestamp > params.deadline) {
-            revert(Errors.EXPIRED_SIGNATURE);
+            revert ExpiredSignature();
         }
         {
-            _checkBridgeInRequestCircle(
+            bytes32 structHash = keccak256(abi.encode(
+                _FUNDS_IN_CIRCLE_TYPEHASH,
                 _msgSender(),
-                address(this),
                 params.token,
                 params.amount,
                 params.commission,
@@ -122,10 +126,10 @@ contract Bridge is
                 params.destinationAddress,
                 params.deadline,
                 params.nonce,
-                params.transactionId,
-                getChainId(),
-                signature
-            );
+                params.transactionId
+            ));
+
+            _verifyTeeSignature(structHash, signature, signerIndex);
 
             _usedNonces[params.nonce] = true;
 
@@ -164,10 +168,11 @@ contract Bridge is
     /// @notice Deposit coin on the bridge to transfer them onto another chain
     /// @dev Deposit coin on the bridge to transfer them onto another chain
     function fundsInNative(
-        BridgeInNativeParams calldata params,
-        bytes calldata signature
+        FundsInNativeParams calldata params,
+        bytes calldata signature,
+        uint256 signerIndex
     ) external payable whenNotPaused {
-        _fundsInNativeCommonOperations(params, signature);
+        _fundsInNativeCommonOperations(params, signature, signerIndex);
 
         emit BridgeFundsInNative(
             _msgSender(),
@@ -183,10 +188,11 @@ contract Bridge is
     /// @notice Deposit tokens on the bridge to transfer them onto another chain. Burn these tokens to mint them on another chain eventually
     /// @dev Deposit tokens on the bridge to transfer them onto another chain
     function fundsInBurn(
-        BridgeInParams calldata params,
-        bytes calldata signature
+        FundsInParams calldata params,
+        bytes calldata signature,
+        uint256 signerIndex
     ) external whenNotPaused {
-        _fundsInCommonOperations(params, signature);
+        _fundsInCommonOperations(params, signature, signerIndex);
 
         IERC20(params.token).safeTransferFrom(
             _msgSender(),
@@ -262,7 +268,8 @@ contract Bridge is
     ) external onlyOwner {
         _fundsOutNativeVerify(recipient, amount);
 
-        recipient.transfer(amount - commission);
+        (bool success, ) = recipient.call{value: amount - commission}('');
+        if (!success) revert NativeTransferFailed();
 
         _nativeCommission += commission;
 
@@ -294,11 +301,11 @@ contract Bridge is
         string calldata sourceAddress
     ) external onlyOwner {
         if (recipient == address(0)) {
-            revert(Errors.INVALID_RECIPIENT_ADDRESS);
+            revert InvalidRecipientAddress();
         }
 
         if (token == address(0)) {
-            revert(Errors.INVALID_TOKEN_ADDRESS);
+            revert InvalidTokenAddress();
         }
 
         FungibleToken(token).mint(recipient, amount - commission);
@@ -317,91 +324,6 @@ contract Bridge is
         );
     }
 
-    /// @notice Send ERC1155 tokens to user using bridge - mint them to the address if token with given id exists. Can be initiated only by the owner
-    /// @param recipient Recipient address on which we mint tokens
-    /// @param token Address of ERC1155 Token
-    /// @param tokenId Token Id
-    /// @param amount Token amount
-    /// @param transactionId ID of the transaction - helper parameter
-    /// @param sourceChain From what chain we transfer to the recipient
-    /// @param sourceAddress From what address(in the chain mentioned above) we transfer to the recipient
-    function multiTokenMint(
-        address recipient,
-        address token,
-        uint256 tokenId,
-        uint256 amount,
-        uint256 transactionId,
-        string calldata sourceChain,
-        string calldata sourceAddress
-    ) external onlyOwner whenNotPaused {
-        if (recipient == address(0)) {
-            revert(Errors.INVALID_RECIPIENT_ADDRESS);
-        }
-        if (bytes(MultiToken(token).uri(tokenId)).length == 0) {
-            revert(Errors.MULTI_TOKEN_NOT_EXIST);
-        }
-
-        MultiToken(token).mint(recipient, tokenId, amount, '');
-
-        emit BridgeMultiTokenMint(
-            recipient,
-            token,
-            tokenId,
-            amount,
-            transactionId,
-            sourceChain,
-            sourceAddress
-        );
-    }
-
-    /// @notice Etch new multiToken with id and tokenURI. Can be initiated only by the owner
-    /// @param tokenAddress Address of MultiToken
-    /// @param tokenId Token Id
-    /// @param tokenURI Token URI
-    function multiTokenEtch(
-        address tokenAddress,
-        uint256 tokenId,
-        string memory tokenURI
-    ) external onlyOwner whenNotPaused {
-        MultiToken multiToken = MultiToken(tokenAddress);
-        if (bytes(multiToken.uri(tokenId)).length > 0) {
-            revert(Errors.MULTI_TOKEN_ALREADY_EXIST);
-        }
-
-        multiToken.setURI(tokenId, tokenURI);
-
-        emit BridgeMultiTokenEtch(tokenAddress, tokenId, tokenURI);
-    }
-
-    /// @notice Deposit tokens on the bridge to transfer them onto another chain
-    /// Burn these tokens to mint them on another chain eventually
-    /// @dev Deposit tokens on the bridge to transfer them onto another chain
-    function fundsInMultiToken(
-        BridgeInERC1155Params calldata params,
-        bytes calldata signature
-    ) external payable whenNotPaused {
-        _fundsInMultiTokenCommonOperations(params, signature, msg.value);
-
-        MultiToken(params.token).burn(
-            _msgSender(),
-            params.tokenId,
-            params.amount
-        );
-
-        emit BridgeMultiTokenInBurn(
-            _msgSender(),
-            params.transactionId,
-            params.nonce,
-            params.token,
-            params.tokenId,
-            params.amount,
-            _stableCommissionPercent,
-            params.gasCommission,
-            params.destinationChain,
-            params.destinationAddress
-        );
-    }
-
     /// @notice Withdraw commission from the collected pool by the specified token
     /// This way we do not affect user deposits as long as commission pool collected separately
     /// @param token Token address
@@ -413,7 +335,7 @@ contract Bridge is
         address recipient
     ) external onlyCommissionCollector {
         if (_commissionPools[token] < amount) {
-            revert(Errors.AMOUNT_EXCEED_COMMISSION_POOL);
+            revert AmountExceedCommissionPool();
         }
         _commissionPools[token] -= amount;
         IERC20(token).safeTransfer(recipient, amount);
@@ -429,10 +351,11 @@ contract Bridge is
         address recipient
     ) external onlyCommissionCollector {
         if (_nativeCommission < amount) {
-            revert(Errors.AMOUNT_EXCEED_COMMISSION_POOL);
+            revert AmountExceedCommissionPool();
         }
         _nativeCommission -= amount;
-        payable(recipient).transfer(amount);
+        (bool success, ) = payable(recipient).call{value: amount}('');
+        if (!success) revert NativeTransferFailed();
         emit WithdrawNativeCommission(amount, recipient);
     }
 
@@ -440,7 +363,7 @@ contract Bridge is
     /// @param circleContract_ contract address
     function setCircleContract(address circleContract_) external onlyOwner {
         if (circleContract_ == address(0)) {
-            revert(Errors.INVALID_CIRCLE_CONTRACT_ADDRESS);
+            revert InvalidCircleContractAddress();
         }
         _circleContract = circleContract_;
     }
@@ -451,7 +374,7 @@ contract Bridge is
         address commissionCollector_
     ) external onlyOwner {
         if (commissionCollector_ == address(0)) {
-            revert(Errors.INVALID_COMMISSION_COLLECTOR_ADDRESS);
+            revert InvalidCommissionCollectorAddress();
         }
         _commissionCollector = commissionCollector_;
     }
@@ -478,8 +401,8 @@ contract Bridge is
         return _commissionCollector;
     }
 
-    /// @notice Get commission collector address
-    /// @return commission collector address
+    /// @notice Get native commission amount
+    /// @return native commission amount
     function getNativeCommission() external view returns (uint256) {
         return _nativeCommission;
     }
@@ -500,7 +423,7 @@ contract Bridge is
         override(OwnableUpgradeable, IBridge)
         onlyOwner
     {
-        revert(Errors.INVALID_SIGNER_ADDRESS);
+        revert RenounceOwnershipBlocked();
     }
 
     /// @notice Get chain id
@@ -519,51 +442,54 @@ contract Bridge is
         return address(this).balance;
     }
 
+    // =========================================================================
+    // Internal — fundsIn common operations
+    // =========================================================================
+
     /// @notice Performs common validations and operations for `fundsIn` and `fundsInBurn` functions
-    /// @param params Struct containing parameters required for the `fundsIn` operation
-    /// @param signature Signature data used to validate the transaction.
     function _fundsInCommonOperations(
-        BridgeInParams calldata params,
-        bytes calldata signature
+        FundsInParams calldata params,
+        bytes calldata signature,
+        uint256 signerIndex
     ) private {
         if (params.token == address(0)) {
-            revert(Errors.INVALID_TOKEN_ADDRESS);
+            revert InvalidTokenAddress();
         }
 
         if (bytes(params.destinationAddress).length == 0) {
-            revert(Errors.INVALID_DESTIONATION_ADDRESS);
+            revert InvalidDestinationAddress();
         }
 
         if (bytes(params.destinationChain).length == 0) {
-            revert(Errors.INVALID_DESTIONATION_CHAIN);
+            revert InvalidDestinationChain();
         }
 
         if (params.commission >= params.amount) {
-            revert(Errors.COMMISSION_GREATER_THAN_AMOUNT);
+            revert CommissionGreaterThanAmount();
         }
 
         if (_usedNonces[params.nonce]) {
-            revert(Errors.ALREADY_USED_SIGNATURE);
+            revert AlreadyUsedSignature();
         }
 
         if (block.timestamp > params.deadline) {
-            revert(Errors.EXPIRED_SIGNATURE);
+            revert ExpiredSignature();
         }
         {
-            _checkBridgeInRequest(
+            bytes32 structHash = keccak256(abi.encode(
+                _FUNDS_IN_TYPEHASH,
                 _msgSender(),
-                address(this),
                 params.token,
                 params.amount,
                 params.commission,
-                params.destinationChain,
-                params.destinationAddress,
+                keccak256(bytes(params.destinationChain)),
+                keccak256(bytes(params.destinationAddress)),
                 params.deadline,
                 params.nonce,
-                params.transactionId,
-                getChainId(),
-                signature
-            );
+                params.transactionId
+            ));
+
+            _verifyTeeSignature(structHash, signature, signerIndex);
 
             _usedNonces[params.nonce] = true;
 
@@ -571,84 +497,44 @@ contract Bridge is
         }
     }
 
-    /// @notice Performs common validations and operations for `fundsInMultiToken`
-    /// @param params The parameters for the bridge-in operation
-    /// @param signature The signature to validate the bridge-in request
-    /// @param commission The commission amount to be added to the total native commission.
-    function _fundsInMultiTokenCommonOperations(
-        BridgeInERC1155Params calldata params,
-        bytes calldata signature,
-        uint256 commission
-    ) private {
-        if (params.token == address(0)) {
-            revert(Errors.INVALID_TOKEN_ADDRESS);
-        }
-        if (bytes(params.destinationAddress).length == 0) {
-            revert(Errors.INVALID_DESTIONATION_ADDRESS);
-        }
-        if (bytes(params.destinationChain).length == 0) {
-            revert(Errors.INVALID_DESTIONATION_CHAIN);
-        }
-        if (_usedNonces[params.nonce]) {
-            revert(Errors.ALREADY_USED_SIGNATURE);
-        }
-        if (block.timestamp > params.deadline) {
-            revert(Errors.EXPIRED_SIGNATURE);
-        }
-        {
-            _checkBridgeInERC1155Request(
-                _msgSender(),
-                address(this),
-                params,
-                getChainId(),
-                signature
-            );
-
-            _usedNonces[params.nonce] = true;
-
-            _nativeCommission += commission;
-        }
-    }
-
     /// @notice Performs common validations and operations for `fundsInNative`
-    /// @param params The parameters for the bridge-in-native operation
-    /// @param signature The signature to validate the bridge-in request
     function _fundsInNativeCommonOperations(
-        BridgeInNativeParams calldata params,
-        bytes calldata signature
+        FundsInNativeParams calldata params,
+        bytes calldata signature,
+        uint256 signerIndex
     ) private {
         if (bytes(params.destinationAddress).length == 0) {
-            revert(Errors.INVALID_DESTIONATION_ADDRESS);
+            revert InvalidDestinationAddress();
         }
 
         if (bytes(params.destinationChain).length == 0) {
-            revert(Errors.INVALID_DESTIONATION_CHAIN);
+            revert InvalidDestinationChain();
         }
 
         if (params.commission >= msg.value) {
-            revert(Errors.COMMISSION_GREATER_THAN_AMOUNT);
+            revert CommissionGreaterThanAmount();
         }
 
         if (_usedNonces[params.nonce]) {
-            revert(Errors.ALREADY_USED_SIGNATURE);
+            revert AlreadyUsedSignature();
         }
 
         if (block.timestamp > params.deadline) {
-            revert(Errors.EXPIRED_SIGNATURE);
+            revert ExpiredSignature();
         }
         {
-            _checkBridgeInNativeRequest(
+            bytes32 structHash = keccak256(abi.encode(
+                _FUNDS_IN_NATIVE_TYPEHASH,
                 _msgSender(),
-                address(this),
                 params.commission,
-                params.destinationChain,
-                params.destinationAddress,
+                keccak256(bytes(params.destinationChain)),
+                keccak256(bytes(params.destinationAddress)),
                 params.deadline,
                 params.nonce,
-                params.transactionId,
-                getChainId(),
-                signature
-            );
+                params.transactionId
+            ));
+
+            _verifyTeeSignature(structHash, signature, signerIndex);
 
             _usedNonces[params.nonce] = true;
 
@@ -656,44 +542,63 @@ contract Bridge is
         }
     }
 
-    /// @notice Verifies the validity of a funds-out operation
-    /// @param token The address of the token being transferred
-    /// @param recipient The address of the recipient receiving the funds
-    /// @param amount The amount of tokens to be transferred
+    // =========================================================================
+    // Internal — fundsOut verification
+    // =========================================================================
+
     function _fundsOutVerify(
         address token,
         address recipient,
         uint256 amount
     ) private view {
         if (recipient == address(0)) {
-            revert(Errors.INVALID_RECIPIENT_ADDRESS);
+            revert InvalidRecipientAddress();
         }
 
         if (token == address(0)) {
-            revert(Errors.INVALID_TOKEN_ADDRESS);
+            revert InvalidTokenAddress();
         }
         uint256 balance = IERC20(token).balanceOf(address(this));
         uint256 allowedBalance = balance - _commissionPools[token];
         if (amount > allowedBalance) {
-            revert(Errors.AMOUNT_EXCEED_BRIDGE_POOL);
+            revert AmountExceedBridgePool();
         }
     }
 
-    /// @notice Verifies the validity of a native token funds-out operation
-    /// @param recipient The address of the recipient receiving the native tokens
-    /// @param amount The amount of native tokens to be transferred
     function _fundsOutNativeVerify(
         address recipient,
         uint256 amount
     ) private view {
         if (recipient == address(0)) {
-            revert(Errors.INVALID_RECIPIENT_ADDRESS);
+            revert InvalidRecipientAddress();
         }
 
         uint256 balance = address(this).balance;
         uint256 allowedBalance = balance - _nativeCommission;
         if (amount > allowedBalance) {
-            revert(Errors.AMOUNT_EXCEED_BRIDGE_POOL);
+            revert AmountExceedBridgePool();
+        }
+    }
+
+    // =========================================================================
+    // Internal — TEE signature verification via MultisigProxy (EIP-712)
+    // =========================================================================
+
+    /// @dev Builds full EIP-712 digest from structHash using MultisigProxy's
+    ///      DOMAIN_SEPARATOR, then verifies the TEE signature.
+    function _verifyTeeSignature(
+        bytes32 structHash,
+        bytes calldata signature,
+        uint256 signerIndex
+    ) private view {
+        IMultisigProxy multisig = IMultisigProxy(owner());
+        bytes32 digest = keccak256(abi.encodePacked(
+            '\x19\x01',
+            multisig.DOMAIN_SEPARATOR(),
+            structHash
+        ));
+        if (!multisig.verifyEnclaveSignature(digest, signature, signerIndex)) {
+            revert InvalidSignature();
         }
     }
 }

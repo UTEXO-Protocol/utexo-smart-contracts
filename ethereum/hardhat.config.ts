@@ -15,7 +15,7 @@ import './tasks/deploy-fungible-token';
 import './tasks/deploy-bridge';
 import './tasks/deploy-proxy-contracts';
 import './tasks/upgrade-bridge';
-import './tasks/deploy-multi-token';
+import './tasks/deploy-multisig-proxy';
 import './tasks/verify-contract';
 
 /**

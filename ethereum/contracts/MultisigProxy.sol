@@ -109,19 +109,13 @@ contract MultisigProxy is IMultisigProxy {
         address commissionRecipient_,
         uint256 timelockDuration_
     ) {
-        require(bridge_ != address(0), 'Zero bridge');
-        require(enclaveSigners_.length > 0, 'No enclave signers');
-        require(
-            enclaveThreshold_ > 0 && enclaveThreshold_ <= enclaveSigners_.length,
-            'Invalid enclave threshold'
-        );
-        require(federationSigners_.length > 0, 'No federation signers');
-        require(
-            federationThreshold_ > 0 && federationThreshold_ <= federationSigners_.length,
-            'Invalid federation threshold'
-        );
-        require(commissionRecipient_ != address(0), 'Zero commission recipient');
-        require(timelockDuration_ < MAX_PROPOSAL_LIFETIME, 'Timelock >= max lifetime');
+        if (bridge_ == address(0)) revert ZeroBridge();
+        if (enclaveSigners_.length == 0) revert NoSigners();
+        if (enclaveThreshold_ == 0 || enclaveThreshold_ > enclaveSigners_.length) revert InvalidThreshold();
+        if (federationSigners_.length == 0) revert NoSigners();
+        if (federationThreshold_ == 0 || federationThreshold_ > federationSigners_.length) revert InvalidThreshold();
+        if (commissionRecipient_ == address(0)) revert ZeroCommissionRecipient();
+        if (timelockDuration_ >= MAX_PROPOSAL_LIFETIME) revert TimelockTooLong();
 
         _validateSigners(enclaveSigners_);
         _validateSigners(federationSigners_);
@@ -138,7 +132,6 @@ contract MultisigProxy is IMultisigProxy {
         teeAllowedSelectors[bytes4(keccak256('fundsOut(address,address,uint256,uint256,uint256,string,string)'))] = true;
         teeAllowedSelectors[bytes4(keccak256('fundsOutMint(address,address,uint256,uint256,uint256,string,string)'))] = true;
         teeAllowedSelectors[bytes4(keccak256('fundsOutNative(address,uint256,uint256,uint256,string,string)'))] = true;
-        teeAllowedSelectors[bytes4(keccak256('multiTokenMint(address,address,uint256,uint256,uint256,string,string)'))] = true;
 
         DOMAIN_SEPARATOR = keccak256(abi.encode(
             _DOMAIN_TYPEHASH,
@@ -161,14 +154,14 @@ contract MultisigProxy is IMultisigProxy {
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external {
-        require(block.timestamp <= deadline, 'Expired');
-        require(callData.length >= 4, 'callData too short');
+        if (block.timestamp > deadline) revert Expired();
+        if (callData.length < 4) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
-        require(teeAllowedSelectors[selector], 'Selector not allowed');
-        require(nonce == nonces[selector], 'Invalid nonce');
+        if (!teeAllowedSelectors[selector]) revert SelectorNotAllowed();
+        if (nonce != nonces[selector]) revert InvalidNonce();
 
         bytes32 digest = _buildDigest(_BRIDGE_OP_TYPEHASH, selector, callData, nonce, deadline);
         _verifySignatures(digest, enclaveBitmap, enclaveSigs, _enclaveSigners, enclaveThreshold);
@@ -192,8 +185,8 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external {
-        require(block.timestamp <= deadline, 'Expired');
-        require(nonce == proposalNonce, 'Invalid nonce');
+        if (block.timestamp > deadline) revert Expired();
+        if (nonce != proposalNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(
             keccak256(abi.encode(_EMERGENCY_PAUSE_TYPEHASH, nonce, deadline))
@@ -215,8 +208,8 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external {
-        require(block.timestamp <= deadline, 'Expired');
-        require(nonce == proposalNonce, 'Invalid nonce');
+        if (block.timestamp > deadline) revert Expired();
+        if (nonce != proposalNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(
             keccak256(abi.encode(_EMERGENCY_UNPAUSE_TYPEHASH, nonce, deadline))
@@ -243,7 +236,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        require(callData.length >= 4, 'callData too short');
+        if (callData.length < 4) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
@@ -426,11 +419,11 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external {
-        require(block.timestamp <= deadline, 'Expired');
-        require(nonce == proposalNonce, 'Invalid nonce');
+        if (block.timestamp > deadline) revert Expired();
+        if (nonce != proposalNonce) revert InvalidNonce();
 
         Proposal storage p = _proposals[proposalId];
-        require(p.status == ProposalStatus.Pending, 'Not pending');
+        if (p.status != ProposalStatus.Pending) revert NotPending();
 
         bytes32 digest = _hashTypedData(
             keccak256(abi.encode(_CANCEL_PROPOSAL_TYPEHASH, proposalId, nonce, deadline))
@@ -450,10 +443,10 @@ contract MultisigProxy is IMultisigProxy {
     /// @inheritdoc IMultisigProxy
     function executeProposal(bytes32 proposalId, bytes calldata opData) external {
         Proposal storage p = _proposals[proposalId];
-        require(p.status == ProposalStatus.Pending, 'Not pending');
-        require(block.timestamp >= p.proposedAt + timelockDuration, 'Timelock active');
-        require(block.timestamp <= p.deadline, 'Proposal expired');
-        require(keccak256(opData) == p.dataHash, 'Data mismatch');
+        if (p.status != ProposalStatus.Pending) revert NotPending();
+        if (block.timestamp < p.proposedAt + timelockDuration) revert TimelockActive();
+        if (block.timestamp > p.deadline) revert ProposalExpired();
+        if (keccak256(opData) != p.dataHash) revert DataMismatch();
 
         p.status = ProposalStatus.Executed;
 
@@ -465,6 +458,17 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
     // View
     // =========================================================================
+
+    /// @inheritdoc IMultisigProxy
+    function verifyEnclaveSignature(
+        bytes32 digest,
+        bytes calldata signature,
+        uint256 signerIndex
+    ) external view returns (bool) {
+        if (signerIndex >= _enclaveSigners.length) revert IndexOutOfRange();
+        address recovered = ECDSA.recover(digest, signature);
+        return recovered == _enclaveSigners[signerIndex];
+    }
 
     /// @inheritdoc IMultisigProxy
     function getNonce(bytes4 selector) external view returns (uint256) {
@@ -500,9 +504,9 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) private returns (bytes32 proposalId) {
-        require(block.timestamp <= deadline, 'Expired');
-        require(deadline <= block.timestamp + MAX_PROPOSAL_LIFETIME, 'Deadline too far');
-        require(nonce == proposalNonce, 'Invalid nonce');
+        if (block.timestamp > deadline) revert Expired();
+        if (deadline > block.timestamp + MAX_PROPOSAL_LIFETIME) revert DeadlineTooFar();
+        if (nonce != proposalNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(structHash);
         _verifySignatures(digest, fedBitmap, fedSigs, _federationSigners, federationThreshold);
@@ -512,7 +516,7 @@ contract MultisigProxy is IMultisigProxy {
         bytes32 dataHash = keccak256(opData);
         proposalId = keccak256(abi.encode(opType, dataHash, nonce));
 
-        require(_proposals[proposalId].status == ProposalStatus.None, 'Proposal exists');
+        if (_proposals[proposalId].status != ProposalStatus.None) revert ProposalExists();
 
         _proposals[proposalId] = Proposal({
             dataHash: dataHash,
@@ -538,8 +542,8 @@ contract MultisigProxy is IMultisigProxy {
 
         } else if (opType == OperationType.UpdateEnclaveSigners) {
             (address[] memory newSigners, uint256 newThreshold) = abi.decode(opData, (address[], uint256));
-            require(newSigners.length > 0, 'No signers');
-            require(newThreshold > 0 && newThreshold <= newSigners.length, 'Invalid threshold');
+            if (newSigners.length == 0) revert NoSigners();
+            if (newThreshold == 0 || newThreshold > newSigners.length) revert InvalidThreshold();
             _validateSigners(newSigners);
             _enclaveSigners = newSigners;
             enclaveThreshold = newThreshold;
@@ -547,8 +551,8 @@ contract MultisigProxy is IMultisigProxy {
 
         } else if (opType == OperationType.UpdateFederationSigners) {
             (address[] memory newSigners, uint256 newThreshold) = abi.decode(opData, (address[], uint256));
-            require(newSigners.length > 0, 'No signers');
-            require(newThreshold > 0 && newThreshold <= newSigners.length, 'Invalid threshold');
+            if (newSigners.length == 0) revert NoSigners();
+            if (newThreshold == 0 || newThreshold > newSigners.length) revert InvalidThreshold();
             _validateSigners(newSigners);
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
@@ -556,14 +560,14 @@ contract MultisigProxy is IMultisigProxy {
 
         } else if (opType == OperationType.UpdateBridge) {
             address newBridge = abi.decode(opData, (address));
-            require(newBridge != address(0), 'Zero bridge');
+            if (newBridge == address(0)) revert ZeroBridge();
             address oldBridge = bridge;
             bridge = newBridge;
             emit BridgeAddressUpdated(oldBridge, newBridge);
 
         } else if (opType == OperationType.SetCommissionRecipient) {
             address newRecipient = abi.decode(opData, (address));
-            require(newRecipient != address(0), 'Zero recipient');
+            if (newRecipient == address(0)) revert ZeroRecipient();
             address old = commissionRecipient;
             commissionRecipient = newRecipient;
             emit CommissionRecipientUpdated(old, newRecipient);
@@ -593,9 +597,11 @@ contract MultisigProxy is IMultisigProxy {
 
         } else if (opType == OperationType.SetTimelockDuration) {
             uint256 newDuration = abi.decode(opData, (uint256));
-            require(newDuration < MAX_PROPOSAL_LIFETIME, 'Duration >= max lifetime');
+            if (newDuration >= MAX_PROPOSAL_LIFETIME) revert TimelockTooLong();
             timelockDuration = newDuration;
             emit TimelockDurationUpdated(newDuration);
+        } else {
+            revert UnknownOperationType();
         }
     }
 
@@ -631,17 +637,17 @@ contract MultisigProxy is IMultisigProxy {
     ) private view {
         uint256 signersLen = signerSet.length;
 
-        require(bitmap >> signersLen == 0, 'Bitmap out of range');
+        if (bitmap >> signersLen != 0) revert BitmapOutOfRange();
 
         uint256 setBits = _popcount(bitmap);
-        require(setBits >= threshold, 'Below threshold');
-        require(sigs.length == setBits, 'Sig count mismatch');
+        if (setBits < threshold) revert BelowThreshold();
+        if (sigs.length != setBits) revert SigCountMismatch();
 
         uint256 sigIdx = 0;
         for (uint256 i = 0; i < signersLen; i++) {
             if (bitmap & (1 << i) != 0) {
                 address recovered = ECDSA.recover(digest, sigs[sigIdx++]);
-                require(recovered == signerSet[i], 'Invalid signature');
+                if (recovered != signerSet[i]) revert InvalidSignature();
             }
         }
     }
@@ -653,9 +659,9 @@ contract MultisigProxy is IMultisigProxy {
     /// @dev Validates no zero addresses and no duplicates. O(n^2), fine for <20 signers.
     function _validateSigners(address[] memory signers) private pure {
         for (uint256 i = 0; i < signers.length; i++) {
-            require(signers[i] != address(0), 'Zero address signer');
+            if (signers[i] == address(0)) revert ZeroAddressSigner();
             for (uint256 j = i + 1; j < signers.length; j++) {
-                require(signers[i] != signers[j], 'Duplicate signer');
+                if (signers[i] == signers[j]) revert DuplicateSigner();
             }
         }
     }
@@ -682,7 +688,7 @@ contract MultisigProxy is IMultisigProxy {
             if (ret.length > 0) {
                 assembly { revert(add(ret, 32), mload(ret)) }
             } else {
-                revert('Call failed');
+                revert CallFailed();
             }
         }
     }

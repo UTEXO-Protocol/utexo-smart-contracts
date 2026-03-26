@@ -1,6 +1,5 @@
 import { ethers } from 'hardhat';
 import { expect } from 'chai';
-import { Wallet } from 'ethers';
 import {
     Bridge,
     FungibleToken,
@@ -17,9 +16,6 @@ describe('FungibleToken contract', function () {
     let user1: SignerWithAddress;
     let user2: SignerWithAddress;
 
-    let systemWallet = new Wallet(
-        '855d9081c7cc3d234fe5f333156ba6efa612be8e0befb14338bacd13a8a90300'
-    );
     const initialSupply = ethers.parseEther('10000');
     const amountToTransfer = ethers.parseEther('1000');
 
@@ -54,7 +50,7 @@ describe('FungibleToken contract', function () {
         await upgradeTx.wait(1);
 
         bridgeContract = await ethers.getContractAt('Bridge', await transparentProxy.getAddress());
-        await bridgeContract.initialize(await systemWallet.getAddress());
+        await bridgeContract.initialize(ethers.ZeroAddress);
 
         // Deploy the FungibleToken contract and transfer some tokens to user1
         fungibleTokenContract = (await FungibleTokenContract.deploy(
