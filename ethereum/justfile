@@ -1,4 +1,0 @@
-set dotenv-load
-
-compile-abi:
-    solc --abi contract/Bridge.sol contract/TricornERC20PausableToken.sol -o contract/abi --overwrite
