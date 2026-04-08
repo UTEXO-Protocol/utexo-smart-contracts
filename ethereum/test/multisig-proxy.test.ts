@@ -1,6 +1,6 @@
 import { ethers } from 'hardhat';
 import { expect } from 'chai';
-import { MultisigProxy, Bridge, FungibleToken } from '../typechain-types';
+import { MultisigProxy, Bridge, TestToken } from '../typechain-types';
 import { Wallet, Interface } from 'ethers';
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { getCurrentTimeFromNetwork, addSecondsToNetwork } from './util';
@@ -23,6 +23,7 @@ import {
 describe('MultisigProxy', function () {
     let multisig: MultisigProxy;
     let bridgeContract: Bridge;
+    let testToken: TestToken;
     let deployer: SignerWithAddress;
     let user1: SignerWithAddress;
     let commissionRecipient: SignerWithAddress;
@@ -50,24 +51,18 @@ describe('MultisigProxy', function () {
     beforeEach(async () => {
         [deployer, user1, commissionRecipient] = await ethers.getSigners() as SignerWithAddress[];
 
-        // Deploy Bridge via proxy
+        // Deploy Bridge directly (no proxy)
         const BridgeFactory = await ethers.getContractFactory('Bridge');
-        const BridgeContractProxyAdmin = await ethers.getContractFactory('BridgeContractProxyAdmin');
-        const TransparentProxy = await ethers.getContractFactory('TransparentProxy');
-        const MockContractV1 = await ethers.getContractFactory('MockContractV1');
-
-        const bridgeImpl = await BridgeFactory.deploy();
-        const mockV1 = await MockContractV1.deploy();
-        const proxyAdmin = await BridgeContractProxyAdmin.deploy();
-        const proxy = await TransparentProxy.deploy(await mockV1.getAddress());
-
-        await proxy.changeAdmin(await proxyAdmin.getAddress());
-        await proxyAdmin.upgrade(await proxy.getAddress(), await bridgeImpl.getAddress());
-
-        bridgeContract = await ethers.getContractAt('Bridge', await proxy.getAddress());
-        await bridgeContract.initialize(ethers.ZeroAddress);
+        bridgeContract = await BridgeFactory.deploy() as Bridge;
+        await bridgeContract.waitForDeployment();
 
         chainId = await bridgeContract.getChainId();
+
+        // Deploy TestToken and fund Bridge for fundsOut tests
+        const TestTokenFactory = await ethers.getContractFactory('TestToken');
+        testToken = await TestTokenFactory.deploy(ethers.parseEther('10000')) as TestToken;
+        await testToken.waitForDeployment();
+        await testToken.transfer(await bridgeContract.getAddress(), ethers.parseEther('1000'));
 
         // Deploy MultisigProxy
         const MultisigFactory = await ethers.getContractFactory('MultisigProxy');
@@ -85,18 +80,7 @@ describe('MultisigProxy', function () {
         // Transfer Bridge ownership to MultisigProxy
         await bridgeContract.transferOwnership(await multisig.getAddress());
 
-        // Set MultisigProxy as commission collector
-        // (need to do this via multisig since Bridge is now owned by it)
-        // For test setup, we set it before transferring ownership... Actually we already transferred.
-        // We'll use proposeAdminExecute for this in tests that need it.
-
         domain = getMultisigDomain(await multisig.getAddress(), chainId);
-
-        // Fund Bridge with native ETH for fundsOut tests (Bridge has no receive(), use hardhat cheat)
-        await ethers.provider.send('hardhat_setBalance', [
-            await bridgeContract.getAddress(),
-            '0x8AC7230489E80000', // 10 ETH
-        ]);
     });
 
     async function getDeadline(offset = 84000) {
@@ -124,13 +108,8 @@ describe('MultisigProxy', function () {
         });
 
         it('should set default TEE allowed selectors', async () => {
-            const fundsOutSelector = ethers.id('fundsOut(address,address,uint256,uint256,uint256,string,string)').slice(0, 10);
-            const fundsOutMintSelector = ethers.id('fundsOutMint(address,address,uint256,uint256,uint256,string,string)').slice(0, 10);
-            const fundsOutNativeSelector = ethers.id('fundsOutNative(address,uint256,uint256,uint256,string,string)').slice(0, 10);
-
+            const fundsOutSelector = ethers.id('fundsOut(address,address,uint256,uint256,string,string)').slice(0, 10);
             expect(await multisig.teeAllowedSelectors(fundsOutSelector)).to.be.true;
-            expect(await multisig.teeAllowedSelectors(fundsOutMintSelector)).to.be.true;
-            expect(await multisig.teeAllowedSelectors(fundsOutNativeSelector)).to.be.true;
         });
 
         it('should revert with zero bridge address', async () => {
@@ -179,18 +158,15 @@ describe('MultisigProxy', function () {
     // =========================================================================
 
     describe('TEE execute()', () => {
-        it('should execute fundsOutNative with valid enclave signatures', async () => {
+        it('should execute fundsOut with valid enclave signatures', async () => {
             const deadline = await getDeadline();
-            const bridgeIface = new Interface([
-                'function fundsOutNative(address payable,uint256,uint256,uint256,string,string)',
-            ]);
-            const callData = bridgeIface.encodeFunctionData('fundsOutNative', [
+            const callData = bridgeContract.interface.encodeFunctionData('fundsOut', [
+                await testToken.getAddress(),
                 await user1.getAddress(),
                 ethers.parseEther('1'),
-                ethers.parseEther('0.1'),
                 1001,
-                'Solana',
-                'SolAddr123',
+                'rgb',
+                'rgb:addr123',
             ]);
             const selector = callData.slice(0, 10) as `0x${string}`;
             const nonce = await multisig.getNonce(selector);
@@ -210,16 +186,13 @@ describe('MultisigProxy', function () {
 
         it('should increment per-selector nonce after execute', async () => {
             const deadline = await getDeadline();
-            const bridgeIface = new Interface([
-                'function fundsOutNative(address payable,uint256,uint256,uint256,string,string)',
-            ]);
-            const callData = bridgeIface.encodeFunctionData('fundsOutNative', [
+            const callData = bridgeContract.interface.encodeFunctionData('fundsOut', [
+                await testToken.getAddress(),
                 await user1.getAddress(),
                 ethers.parseEther('1'),
-                ethers.parseEther('0.1'),
                 1001,
-                'Solana',
-                'SolAddr123',
+                'rgb',
+                'rgb:addr123',
             ]);
             const selector = callData.slice(0, 10) as `0x${string}`;
 
@@ -263,11 +236,8 @@ describe('MultisigProxy', function () {
 
         it('should revert with invalid nonce', async () => {
             const deadline = await getDeadline();
-            const bridgeIface = new Interface([
-                'function fundsOutNative(address payable,uint256,uint256,uint256,string,string)',
-            ]);
-            const callData = bridgeIface.encodeFunctionData('fundsOutNative', [
-                await user1.getAddress(), ethers.parseEther('1'), 0, 1001, 'Solana', 'Addr',
+            const callData = bridgeContract.interface.encodeFunctionData('fundsOut', [
+                await testToken.getAddress(), await user1.getAddress(), ethers.parseEther('1'), 1001, 'rgb', 'addr',
             ]);
             const selector = callData.slice(0, 10) as `0x${string}`;
             const wrongNonce = 999n;
@@ -285,11 +255,8 @@ describe('MultisigProxy', function () {
 
         it('should revert with below-threshold signatures', async () => {
             const deadline = await getDeadline();
-            const bridgeIface = new Interface([
-                'function fundsOutNative(address payable,uint256,uint256,uint256,string,string)',
-            ]);
-            const callData = bridgeIface.encodeFunctionData('fundsOutNative', [
-                await user1.getAddress(), ethers.parseEther('1'), 0, 1001, 'Solana', 'Addr',
+            const callData = bridgeContract.interface.encodeFunctionData('fundsOut', [
+                await testToken.getAddress(), await user1.getAddress(), ethers.parseEther('1'), 1001, 'rgb', 'addr',
             ]);
             const selector = callData.slice(0, 10) as `0x${string}`;
 
@@ -307,11 +274,8 @@ describe('MultisigProxy', function () {
 
         it('should revert with invalid signature', async () => {
             const deadline = await getDeadline();
-            const bridgeIface = new Interface([
-                'function fundsOutNative(address payable,uint256,uint256,uint256,string,string)',
-            ]);
-            const callData = bridgeIface.encodeFunctionData('fundsOutNative', [
-                await user1.getAddress(), ethers.parseEther('1'), 0, 1001, 'Solana', 'Addr',
+            const callData = bridgeContract.interface.encodeFunctionData('fundsOut', [
+                await testToken.getAddress(), await user1.getAddress(), ethers.parseEther('1'), 1001, 'rgb', 'addr',
             ]);
             const selector = callData.slice(0, 10) as `0x${string}`;
 

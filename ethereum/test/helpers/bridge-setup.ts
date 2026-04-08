@@ -11,7 +11,7 @@ export interface BridgeTestEnv {
 }
 
 /**
- * Deploys Bridge (behind TransparentProxy) + MultisigProxy.
+ * Deploys Bridge + MultisigProxy.
  * Transfers Bridge ownership to MultisigProxy.
  * Uses a single TEE signer with threshold 1 and a single federation signer with threshold 1.
  */
@@ -21,39 +21,24 @@ export async function deployBridgeWithMultisig(): Promise<BridgeTestEnv> {
     const teeSigner = Wallet.createRandom();
     const federationSigner = Wallet.createRandom();
 
-    // Deploy Bridge via proxy
-    const BridgeContract = await ethers.getContractFactory('Bridge');
-    const BridgeContractProxyAdmin = await ethers.getContractFactory('BridgeContractProxyAdmin');
-    const TransparentProxy = await ethers.getContractFactory('TransparentProxy');
-    const MockContractV1 = await ethers.getContractFactory('MockContractV1');
-
-    const bridgeImpl = await BridgeContract.deploy();
-    const mockV1 = await MockContractV1.deploy();
-    const proxyAdmin = await BridgeContractProxyAdmin.deploy();
-    const transparentProxy = await TransparentProxy.deploy(await mockV1.getAddress());
-
-    await transparentProxy.changeAdmin(await proxyAdmin.getAddress());
-    await proxyAdmin.upgrade(await transparentProxy.getAddress(), await bridgeImpl.getAddress());
-
-    const bridge = await ethers.getContractAt('Bridge', await transparentProxy.getAddress()) as Bridge;
-    await bridge.initialize(ethers.ZeroAddress);
+    const BridgeFactory = await ethers.getContractFactory('Bridge');
+    const bridge = await BridgeFactory.deploy() as Bridge;
+    await bridge.waitForDeployment();
 
     const chainId = await bridge.getChainId();
 
-    // Deploy MultisigProxy with single TEE signer (threshold 1) and single federation signer
     const MultisigFactory = await ethers.getContractFactory('MultisigProxy');
     const multisig = await MultisigFactory.deploy(
         await bridge.getAddress(),
         [teeSigner.address],
-        1,  // enclave threshold
+        1,
         [federationSigner.address],
-        1,  // federation threshold
-        await deployer.getAddress(),  // commission recipient
-        3600  // timelock
+        1,
+        await deployer.getAddress(),
+        3600
     ) as MultisigProxy;
     await multisig.waitForDeployment();
 
-    // Transfer Bridge ownership to MultisigProxy
     await bridge.transferOwnership(await multisig.getAddress());
 
     const domain: TypedDataDomain = {
@@ -70,43 +55,26 @@ export async function deployBridgeWithMultisig(): Promise<BridgeTestEnv> {
 // EIP-712 signing helpers for fundsIn operations
 // =========================================================================
 
+/**
+ * EIP-712 type definition for FundsIn.
+ * Must match Bridge._FUNDS_IN_TYPEHASH exactly.
+ *
+ * Domain: { name: "MultisigProxy", version: "1", chainId, verifyingContract: <MultisigProxy address> }
+ *
+ * Type string:
+ *   FundsIn(address sender,address token,uint256 amount,string destinationChain,
+ *           string destinationAddress,uint256 deadline,uint256 nonce,uint256 transactionId)
+ */
 const FundsInTypes = {
     FundsIn: [
-        { name: 'sender', type: 'address' },
-        { name: 'token', type: 'address' },
-        { name: 'amount', type: 'uint256' },
-        { name: 'commission', type: 'uint256' },
-        { name: 'destinationChain', type: 'string' },
-        { name: 'destinationAddress', type: 'string' },
-        { name: 'deadline', type: 'uint256' },
-        { name: 'nonce', type: 'uint256' },
-        { name: 'transactionId', type: 'uint256' },
-    ],
-};
-
-const FundsInNativeTypes = {
-    FundsInNative: [
-        { name: 'sender', type: 'address' },
-        { name: 'commission', type: 'uint256' },
-        { name: 'destinationChain', type: 'string' },
-        { name: 'destinationAddress', type: 'string' },
-        { name: 'deadline', type: 'uint256' },
-        { name: 'nonce', type: 'uint256' },
-        { name: 'transactionId', type: 'uint256' },
-    ],
-};
-
-const FundsInCircleTypes = {
-    FundsInCircle: [
-        { name: 'sender', type: 'address' },
-        { name: 'token', type: 'address' },
-        { name: 'amount', type: 'uint256' },
-        { name: 'commission', type: 'uint256' },
-        { name: 'destinationChain', type: 'uint32' },
-        { name: 'destinationAddress', type: 'bytes32' },
-        { name: 'deadline', type: 'uint256' },
-        { name: 'nonce', type: 'uint256' },
-        { name: 'transactionId', type: 'uint256' },
+        { name: 'sender',             type: 'address' },
+        { name: 'token',              type: 'address' },
+        { name: 'amount',             type: 'uint256' },
+        { name: 'destinationChain',   type: 'string'  },
+        { name: 'destinationAddress', type: 'string'  },
+        { name: 'deadline',           type: 'uint256' },
+        { name: 'nonce',              type: 'uint256' },
+        { name: 'transactionId',      type: 'uint256' },
     ],
 };
 
@@ -117,7 +85,6 @@ export async function signFundsIn(
         sender: string;
         token: string;
         amount: bigint;
-        commission: bigint;
         destinationChain: string;
         destinationAddress: string;
         deadline: number;
@@ -126,38 +93,4 @@ export async function signFundsIn(
     }
 ): Promise<string> {
     return signer.signTypedData(domain, FundsInTypes, params);
-}
-
-export async function signFundsInNative(
-    signer: Wallet,
-    domain: TypedDataDomain,
-    params: {
-        sender: string;
-        commission: bigint;
-        destinationChain: string;
-        destinationAddress: string;
-        deadline: number;
-        nonce: number;
-        transactionId: number;
-    }
-): Promise<string> {
-    return signer.signTypedData(domain, FundsInNativeTypes, params);
-}
-
-export async function signFundsInCircle(
-    signer: Wallet,
-    domain: TypedDataDomain,
-    params: {
-        sender: string;
-        token: string;
-        amount: bigint;
-        commission: bigint;
-        destinationChain: number;
-        destinationAddress: string;
-        deadline: number;
-        nonce: number;
-        transactionId: number;
-    }
-): Promise<string> {
-    return signer.signTypedData(domain, FundsInCircleTypes, params);
 }

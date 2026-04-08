@@ -129,9 +129,7 @@ contract MultisigProxy is IMultisigProxy {
         timelockDuration = timelockDuration_;
 
         // Default TEE allowlist
-        teeAllowedSelectors[bytes4(keccak256('fundsOut(address,address,uint256,uint256,uint256,string,string)'))] = true;
-        teeAllowedSelectors[bytes4(keccak256('fundsOutMint(address,address,uint256,uint256,uint256,string,string)'))] = true;
-        teeAllowedSelectors[bytes4(keccak256('fundsOutNative(address,uint256,uint256,uint256,string,string)'))] = true;
+        teeAllowedSelectors[bytes4(keccak256('fundsOut(address,address,uint256,uint256,string,string)'))] = true;
 
         DOMAIN_SEPARATOR = keccak256(abi.encode(
             _DOMAIN_TYPEHASH,
