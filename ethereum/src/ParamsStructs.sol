@@ -9,6 +9,7 @@ pragma solidity 0.8.20;
 /// @param destinationAddress Address where we transfer tokens on the chain mentioned above
 /// @param deadline Timestamp until transaction is valid
 /// @param nonce Parameter to avoid repeat transaction attack
+/// @param transactionId Unique transaction identifier
 struct FundsInParams {
     address token;
     uint256 amount;
