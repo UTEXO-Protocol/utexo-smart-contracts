@@ -1,29 +1,29 @@
 # UTEXO Bridge — EVM Contracts
 
-Solidity smart contracts for the Ethereum/Arbitrum side of the UTEXO bridge. Built with Hardhat, Solidity 0.8.20.
+Solidity smart contracts for the Ethereum/Arbitrum side of the UTEXO bridge. Built with **Foundry**, Solidity 0.8.20.
 
 ## Contracts
 
-### BridgeBase (`contracts/BridgeBase.sol`)
+### BridgeBase (`src/BridgeBase.sol`)
 
 Abstract base contract shared by `BaseBridge` and `Bridge`. Provides:
 
 - Single accepted ERC-20 token (immutable, set at deployment).
-- `FundsIn` event (minimal: sender, operationId, nonce, amount, destinationAddress).
+- `FundsIn` event (minimal: `sender, operationId, amount`).
 - Owner-only `pause` / `unpause`.
 - Permanently blocked `renounceOwnership` (reverts with `RenounceOwnershipBlocked`).
 - View helpers: `getContractBalance()`, `getChainId()`.
 
-### BaseBridge (`contracts/BaseBridge.sol`)
+### BaseBridge (`src/BaseBridge.sol`)
 
 Minimal bridge for integrators. Inherits `BridgeBase`.
 
-- `fundsIn(amount, destinationAddress, nonce, operationId)` — open, no signature required. Locks tokens and emits `FundsIn`.
+- `fundsIn(amount, operationId)` — open, no signature required. Locks tokens and emits `FundsIn`.
 - `fundsOut(recipient, amount, operationId, sourceAddress)` — `onlyOwner`. Releases tokens and emits `FundsOut`.
 
-No TEE verification, no destination chain field. Suitable for single-chain RGB integrations where the owner is a standard multisig.
+No TEE verification, no destination chain field. Suitable for integrations where the owner is a standard multisig or EOA.
 
-### Bridge (`contracts/Bridge.sol`)
+### Bridge (`src/Bridge.sol`)
 
 Production bridge for UTEXO. Inherits `BridgeBase`, implements `IBridge`.
 
@@ -34,7 +34,7 @@ Production bridge for UTEXO. Inherits `BridgeBase`, implements `IBridge`.
 
 Owner **must** be `MultisigProxy`. `fundsOut` is only reachable through `MultisigProxy.execute()` which requires M-of-N TEE signatures.
 
-### MultisigProxy (`contracts/MultisigProxy.sol`)
+### MultisigProxy (`src/MultisigProxy.sol`)
 
 Owner of `Bridge`. Two-level ECDSA M-of-N multisig:
 
@@ -51,7 +51,7 @@ The user calls `Bridge.fundsIn()` directly. No signature is required — any use
 
 ### FundsOut (bridge withdrawals)
 
-`Bridge.fundsOut()` is `onlyOwner`, where the owner is `MultisigProxy`. The backend collects M-of-N ECDSA signatures from TEE signers over an EIP-712 `BridgeOperation` message (selector, callData, nonce, ). A bitmap indicates which signers participated. `MultisigProxy.execute()` verifies the signatures on-chain and forwards the call to `Bridge`.
+`Bridge.fundsOut()` is `onlyOwner`, where the owner is `MultisigProxy`. The backend collects M-of-N ECDSA signatures from TEE signers over an EIP-712 `BridgeOperation` message (selector, callData, nonce, deadline). A bitmap indicates which signers participated. `MultisigProxy.execute()` verifies the signatures on-chain and forwards the call to `Bridge`.
 
 ### Federation governance (two-phase timelock)
 
@@ -68,107 +68,129 @@ All signatures use EIP-712 typed structured data with domain `name: "MultisigPro
 
 ## Prerequisites
 
-- Node.js v18+
-- npm
+- [Foundry](https://book.getfoundry.sh/getting-started/installation) (forge + cast)
+- Git
 
 ## Setup
 
 ```sh
-npm install
+forge install        # fetch forge-std + openzeppelin-contracts submodules
+forge build
 ```
 
 ## Commands
 
 ```sh
-npx hardhat compile    # Compile contracts, generate TypeChain types
-npx hardhat test       # Run all tests
-npx hardhat coverage   # Generate coverage report
-npx hardhat clean      # Delete compiled artifacts and cache
+forge build                              # compile
+forge test                               # run all tests
+forge test --match-path "test/Bridge.t.sol"  # run one file
+forge test -vvv                          # with traces
+forge coverage                           # coverage report
+forge clean                              # delete out/ + cache/
 ```
 
 ## Environment
 
-Copy `.env.testnet` to `.env` and fill in:
-
-```
-DEPLOY_KEY=<deployer-private-key>
-ETHERSCAN_API_KEY=<etherscan-api-key>
-ARBITRUM_SEPOLIA_URL=<rpc-url>
-```
+Copy `.env.example` to `.env` and fill in the values for the scripts you intend to run. The file is grouped by purpose (deploy vs. interact).
 
 ## Deployment
 
-### Option A — Bridge + MultisigProxy
+All deploy scripts live in `script/deploy/`. They read their inputs from `.env`.
 
-#### Step 1 — Deploy Bridge
-
-```sh
-npx hardhat deploy-bridge --network <NETWORK> \
-  --usdt0 <USDT0_TOKEN_ADDRESS>
-```
-
-Deploys `Bridge` with the given USDT0 token address. The deployer becomes the initial owner.
-Output: Bridge contract address.
-
-#### Step 2 — Deploy MultisigProxy
+### Option A — Full production (Bridge + MultisigProxy + ownership transfer)
 
 ```sh
-npx hardhat deploy-multisig-proxy --network <NETWORK> \
-  --bridge <BRIDGE_ADDRESS> \
-  --enclavesigners "0xTEE1,0xTEE2,0xTEE3" \
-  --enclavethreshold 2 \
-  --federationsigners "0xFED1,0xFED2,0xFED3" \
-  --federationthreshold 2 \
-  --commissionrecipient <RECIPIENT_ADDRESS> \
-  --timelock 3600
+forge script script/deploy/DeployAll.s.sol \
+  --rpc-url $RPC_URL --broadcast --verify
 ```
 
-Deploys `MultisigProxy` and (by default) calls `Bridge.transferOwnership(multisigAddress)`.
-Pass `--transferownership false` to skip the ownership transfer and do it manually later.
+Deploys `Bridge`, deploys `MultisigProxy`, then calls `Bridge.transferOwnership(multisig)` in a single transaction batch.
 
-### Option B — BaseBridge
+### Option B — Step-by-step
 
 ```sh
-npx hardhat deploy-base-bridge --network <NETWORK> \
-  --token <TOKEN_ADDRESS>
+# 1. Deploy Bridge (owner = deployer)
+forge script script/deploy/DeployBridge.s.sol --rpc-url $RPC_URL --broadcast --verify
+
+# 2. Deploy MultisigProxy (set BRIDGE_ADDRESS in .env to the address from step 1)
+forge script script/deploy/DeployMultisigProxy.s.sol --rpc-url $RPC_URL --broadcast --verify
+
+# 3. Transfer ownership manually
+cast send $BRIDGE_ADDRESS "transferOwnership(address)" $PROXY_ADDRESS \
+  --rpc-url $RPC_URL --private-key $PRIVATE_KEY
 ```
 
-Deploys `BaseBridge` with the given token address. The deployer becomes the initial owner.
-Transfer ownership to your multisig after deployment:
+### Option C — BaseBridge (integrators, e.g. Bitfinex)
 
-```ts
-await baseBridge.transferOwnership(<YOUR_MULTISIG_ADDRESS>);
+```sh
+forge script script/deploy/DeployBaseBridge.s.sol --rpc-url $RPC_URL --broadcast --verify
+```
+
+Deploys `BaseBridge` with `TOKEN_ADDRESS`. The deployer becomes the initial owner; transfer to the integrator's multisig after deployment:
+
+```sh
+cast send $BASE_BRIDGE_ADDRESS "transferOwnership(address)" $INTEGRATOR_MULTISIG \
+  --rpc-url $RPC_URL --private-key $PRIVATE_KEY
 ```
 
 `BaseBridge` has no dependency on `MultisigProxy` — use any multisig or EOA as owner.
 
+## Interaction scripts
+
+Scripts in `script/interact/` let you exercise contracts manually before the backend is wired up. All read inputs from `.env`.
+
+| Script | What it does |
+|---|---|
+| `BridgeFundsIn.s.sol` | Approves tokens and calls `Bridge.fundsIn()` |
+| `BaseBridgeFundsIn.s.sol` | Approves tokens and calls `BaseBridge.fundsIn(amount, operationId)` |
+| `BaseBridgeFundsOut.s.sol` | Calls `BaseBridge.fundsOut()` as owner |
+| `MultisigExecuteFundsOut.s.sol` | Signs a `Bridge.fundsOut()` locally with `ENCLAVE_PKS` and submits via `MultisigProxy.execute()` |
+| `EmergencyPause.s.sol` | Signs and submits `MultisigProxy.emergencyPause()` with `FED_PKS` |
+| `EmergencyUnpause.s.sol` | Signs and submits `MultisigProxy.emergencyUnpause()` with `FED_PKS` |
+
+Example:
+
+```sh
+forge script script/interact/BridgeFundsIn.s.sol --rpc-url $RPC_URL --broadcast
+```
+
+> **Security note:** `MultisigExecuteFundsOut` signs with local private keys from `.env`. Only use for testnet and local end-to-end checks. In production, TEE enclaves produce signatures; this script just simulates that flow.
+
 ## Post-deployment checklist
 
-After deployment:
-
-1. Verify Bridge ownership: `Bridge.owner()` should return the `MultisigProxy` address.
-2. Verify enclave signers: `MultisigProxy.getEnclaveSigners()` should return the TEE addresses.
-3. Verify federation signers: `MultisigProxy.getFederationSigners()` should return the governance addresses.
-4. Verify TEE-allowed selectors: `MultisigProxy.teeAllowedSelectors(selector)` should return `true` for `fundsOut`.
+1. Verify Bridge ownership: `Bridge.owner()` returns the `MultisigProxy` address.
+2. Verify enclave signers: `MultisigProxy.getEnclaveSigners()` returns the TEE addresses.
+3. Verify federation signers: `MultisigProxy.getFederationSigners()` returns the governance addresses.
+4. Verify TEE-allowed selectors: `MultisigProxy.teeAllowedSelectors(selector)` returns `true` for `fundsOut`.
 5. Test `fundsIn` with a small amount to confirm token transfer and event emission.
 
 ## Project structure
 
 ```
-contracts/
+src/
   BridgeBase.sol              — Abstract base: token, pause, shared event/errors
-  BaseBridge.sol              — Minimal bridge for RGB/Bitfinex integrators
+  BaseBridge.sol              — Minimal bridge for integrators
   Bridge.sol                  — Production bridge (dual-event, MultisigProxy owner)
   MultisigProxy.sol           — M-of-N multisig owner of Bridge
-  ParamsStructs.sol           — Shared parameter structs
   interfaces/
     IBridge.sol               — Bridge interface, events, and custom errors
     IMultisigProxy.sol        — MultisigProxy interface and custom errors
-  test-contracts/
-    TestToken.sol             — ERC-20 token for testing
-tasks/                        — Hardhat deployment tasks
-test/                         — Tests
+
+script/
+  deploy/                     — Deployment scripts (DeployBridge, DeployBaseBridge,
+                                DeployMultisigProxy, DeployAll)
+  interact/                   — Manual interaction scripts (fundsIn, fundsOut,
+                                execute, emergencyPause, emergencyUnpause)
+
+test/
+  Bridge.t.sol                — Bridge tests
+  BaseBridge.t.sol            — BaseBridge tests
+  MultisigProxy.t.sol         — MultisigProxy tests (EIP-712, bitmap sigs, proposals)
   helpers/
-    multisig-helpers.ts       — EIP-712 signing utilities
-    bridge-setup.ts           — Shared test deployment helper
+    MockERC20.sol             — Mintable ERC-20 for tests
+    MultisigHelper.sol        — EIP-712 digest builders and signAll helper
+
+lib/                          — Foundry submodules (forge-std, openzeppelin-contracts)
+foundry.toml                  — Foundry configuration
+.env.example                  — Environment template
 ```

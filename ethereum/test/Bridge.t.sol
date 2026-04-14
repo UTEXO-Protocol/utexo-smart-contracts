@@ -1,287 +1,251 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
-import {Test} from "forge-std/Test.sol";
-import {Bridge} from "../src/Bridge.sol";
-import {IBridge} from "../src/interfaces/IBridge.sol";
-import {FundsInParams} from "../src/ParamsStructs.sol";
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-
-// =========================================================================
-// Mock ERC-20
-// =========================================================================
-
-contract MockERC20 is ERC20 {
-    constructor(string memory name, string memory symbol) ERC20(name, symbol) {}
-
-    function mint(address to, uint256 amount) external {
-        _mint(to, amount);
-    }
-}
-
-// =========================================================================
-// Bridge tests
-// =========================================================================
+import { Test } from 'forge-std/Test.sol';
+import { Bridge }    from '../src/Bridge.sol';
+import { IBridge }   from '../src/interfaces/IBridge.sol';
+import { BridgeBase } from '../src/BridgeBase.sol';
+import { MockERC20 } from './helpers/MockERC20.sol';
+import { Ownable }   from '@openzeppelin/contracts/access/Ownable.sol';
+import { Pausable }  from '@openzeppelin/contracts/utils/Pausable.sol';
 
 contract BridgeTest is Test {
-    event FundsIn(
+    // Events re-declared locally for vm.expectEmit
+    event FundsIn(address indexed sender, uint256 operationId, uint256 amount);
+    event BridgeFundsIn(
         address indexed sender,
         uint256 transactionId,
         uint256 nonce,
-        address token,
         uint256 amount,
-        string destinationChain,
-        string destinationAddress
+        string  destinationChain,
+        string  destinationAddress
     );
-
-    event FundsOut(
+    event BridgeFundsOut(
         address indexed recipient,
-        address token,
         uint256 amount,
         uint256 transactionId,
-        string sourceChain,
-        string sourceAddress
+        string  sourceChain,
+        string  sourceAddress
     );
-    Bridge bridge;
-    MockERC20 token;
-    MockERC20 unsupportedToken;
 
-    address owner = makeAddr("owner");
-    address user = makeAddr("user");
+    Bridge     bridge;
+    MockERC20  usdt0;
 
-    uint256 constant INITIAL_BALANCE = 1000e18;
+    address deployer  = makeAddr('deployer');
+    address user      = makeAddr('user');
+    address recipient = makeAddr('recipient');
+    address multisig  = makeAddr('multisig');
 
-    // fundsIn defaults
-    string constant DST_CHAIN = "bitcoin";
-    string constant DST_ADDRESS = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
-    uint256 constant NONCE = 1;
-    uint256 constant TX_ID = 42;
-    uint256 constant AMOUNT = 100e18;
+    string  constant DST_CHAIN  = 'rgb';
+    string  constant DST_ADDR   = 'rgb:asset1qp0y3mq6h5k8d9f2e4j7n6c3w/utxo1abc123';
+    string  constant SRC_CHAIN  = 'rgb';
+    string  constant SRC_ADDR   = 'rgb:sender/utxo1src';
+    uint256 constant AMOUNT     = 100e18;
+    uint256 constant TX_ID      = 42;
+    uint256 constant NONCE      = 7;
 
     function setUp() public {
-        token = new MockERC20("Mock USDT", "mUSDT");
-        unsupportedToken = new MockERC20("Unsupported", "UNS");
+        usdt0 = new MockERC20('Mock USDT0', 'USDT0');
 
-        address[] memory supportedTokens = new address[](1);
-        supportedTokens[0] = address(token);
+        vm.prank(deployer);
+        bridge = new Bridge(address(usdt0));
 
-        vm.prank(owner);
-        bridge = new Bridge(supportedTokens);
+        // deployer transfers ownership to multisig (production flow)
+        vm.prank(deployer);
+        bridge.transferOwnership(multisig);
 
-        token.mint(user, INITIAL_BALANCE);
+        // fund user and approve bridge
+        usdt0.mint(user, AMOUNT * 10);
         vm.prank(user);
-        token.approve(address(bridge), type(uint256).max);
+        usdt0.approve(address(bridge), type(uint256).max);
     }
 
-    // =========================================================================
-    // Helpers
-    // =========================================================================
-
-    function _defaultParams() internal view returns (FundsInParams memory) {
-        return FundsInParams({
-            token: address(token),
-            amount: AMOUNT,
-            destinationChain: DST_CHAIN,
-            destinationAddress: DST_ADDRESS,
-            deadline: block.timestamp + 1 hours,
-            nonce: NONCE,
-            transactionId: TX_ID
-        });
-    }
-
-    // =========================================================================
+    // ========================================================================
     // Constructor
-    // =========================================================================
+    // ========================================================================
 
-    function test_constructor_setsOwner() public view {
-        assertEq(bridge.owner(), owner);
+    function test_constructor_setsTokenAndOwner() public view {
+        assertEq(bridge.token(), address(usdt0));
+        assertEq(bridge.owner(), multisig);
     }
 
-    function test_constructor_revertsOnZeroTokenAddress() public {
-        address[] memory tokens = new address[](1);
-        tokens[0] = address(0);
-
-        vm.expectRevert(IBridge.InvalidTokenAddress.selector);
-        new Bridge(tokens);
+    function test_constructor_revertsOnZeroToken() public {
+        vm.expectRevert(BridgeBase.InvalidTokenAddress.selector);
+        new Bridge(address(0));
     }
 
-    function test_constructor_acceptsEmptyTokenList() public {
-        address[] memory tokens = new address[](0);
-        Bridge emptyBridge = new Bridge(tokens);
-        assertEq(emptyBridge.owner(), address(this));
-    }
-
-    // =========================================================================
+    // ========================================================================
     // fundsIn — happy path
-    // =========================================================================
+    // ========================================================================
 
-    function test_fundsIn_transfersTokensToBridge() public {
-        FundsInParams memory params = _defaultParams();
+    function test_fundsIn_transfersTokens() public {
+        uint256 userBefore = usdt0.balanceOf(user);
 
         vm.prank(user);
-        bridge.fundsIn(params);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
 
-        assertEq(token.balanceOf(address(bridge)), AMOUNT);
-        assertEq(token.balanceOf(user), INITIAL_BALANCE - AMOUNT);
+        assertEq(usdt0.balanceOf(address(bridge)), AMOUNT);
+        assertEq(usdt0.balanceOf(user),            userBefore - AMOUNT);
     }
 
-    function test_fundsIn_emitsEvent() public {
-        FundsInParams memory params = _defaultParams();
-
+    function test_fundsIn_emitsBothEvents() public {
         vm.expectEmit(true, false, false, true);
-        emit FundsIn(user, TX_ID, NONCE, address(token), AMOUNT, DST_CHAIN, DST_ADDRESS);
+        emit FundsIn(user, TX_ID, AMOUNT);
+        vm.expectEmit(true, false, false, true);
+        emit BridgeFundsIn(user, TX_ID, NONCE, AMOUNT, DST_CHAIN, DST_ADDR);
 
         vm.prank(user);
-        bridge.fundsIn(params);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
     }
 
-    // =========================================================================
+    function test_fundsIn_anyUserCanCall() public {
+        address stranger = makeAddr('stranger');
+        usdt0.mint(stranger, AMOUNT);
+        vm.prank(stranger);
+        usdt0.approve(address(bridge), AMOUNT);
+
+        vm.prank(stranger);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+
+        assertEq(usdt0.balanceOf(address(bridge)), AMOUNT);
+    }
+
+    // ========================================================================
     // fundsIn — reverts
-    // =========================================================================
-
-    function test_fundsIn_revertsOnUnsupportedToken() public {
-        FundsInParams memory params = _defaultParams();
-        params.token = address(unsupportedToken);
-
-        vm.expectRevert(IBridge.InvalidTokenAddress.selector);
-        vm.prank(user);
-        bridge.fundsIn(params);
-    }
+    // ========================================================================
 
     function test_fundsIn_revertsOnEmptyDestinationAddress() public {
-        FundsInParams memory params = _defaultParams();
-        params.destinationAddress = "";
-
         vm.expectRevert(IBridge.InvalidDestinationAddress.selector);
         vm.prank(user);
-        bridge.fundsIn(params);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, '', NONCE, TX_ID);
     }
 
     function test_fundsIn_revertsOnEmptyDestinationChain() public {
-        FundsInParams memory params = _defaultParams();
-        params.destinationChain = "";
-
         vm.expectRevert(IBridge.InvalidDestinationChain.selector);
         vm.prank(user);
-        bridge.fundsIn(params);
+        bridge.fundsIn(AMOUNT, '', DST_ADDR, NONCE, TX_ID);
     }
 
-    function test_fundsIn_revertsOnExpiredDeadline() public {
-        FundsInParams memory params = _defaultParams();
-        params.deadline = block.timestamp - 1;
+    function test_fundsIn_revertsWhenPaused() public {
+        vm.prank(multisig);
+        bridge.pause();
 
-        vm.expectRevert(IBridge.ExpiredDeadline.selector);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(params);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
     }
 
-    function test_fundsIn_revertsOnDeadlineEqualToTimestamp() public {
-        FundsInParams memory params = _defaultParams();
-        params.deadline = block.timestamp;
-
-        // deadline == block.timestamp passes (strictly >)
-        vm.prank(user);
-        bridge.fundsIn(params);
-    }
-
-    // =========================================================================
+    // ========================================================================
     // fundsOut — happy path
-    // =========================================================================
+    // ========================================================================
 
-    function test_fundsOut_transfersTokensToRecipient() public {
-        // First deposit some tokens
+    function test_fundsOut_transfersAndEmits() public {
+        // lock first
         vm.prank(user);
-        bridge.fundsIn(_defaultParams());
-
-        address recipient = makeAddr("recipient");
-
-        vm.prank(owner);
-        bridge.fundsOut(address(token), recipient, AMOUNT, TX_ID, "bitcoin", DST_ADDRESS);
-
-        assertEq(token.balanceOf(recipient), AMOUNT);
-        assertEq(token.balanceOf(address(bridge)), 0);
-    }
-
-    function test_fundsOut_emitsEvent() public {
-        vm.prank(user);
-        bridge.fundsIn(_defaultParams());
-
-        address recipient = makeAddr("recipient");
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
 
         vm.expectEmit(true, false, false, true);
-        emit FundsOut(recipient, address(token), AMOUNT, TX_ID, "bitcoin", DST_ADDRESS);
+        emit BridgeFundsOut(recipient, AMOUNT, TX_ID, SRC_CHAIN, SRC_ADDR);
 
-        vm.prank(owner);
-        bridge.fundsOut(address(token), recipient, AMOUNT, TX_ID, "bitcoin", DST_ADDRESS);
+        vm.prank(multisig);
+        bridge.fundsOut(address(usdt0), recipient, AMOUNT, TX_ID, SRC_CHAIN, SRC_ADDR);
+
+        assertEq(usdt0.balanceOf(recipient),       AMOUNT);
+        assertEq(usdt0.balanceOf(address(bridge)), 0);
     }
 
-    // =========================================================================
+    // ========================================================================
     // fundsOut — reverts
-    // =========================================================================
+    // ========================================================================
 
     function test_fundsOut_revertsIfNotOwner() public {
         vm.prank(user);
-        bridge.fundsIn(_defaultParams());
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
 
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
-        bridge.fundsOut(address(token), user, AMOUNT, TX_ID, "bitcoin", DST_ADDRESS);
+        bridge.fundsOut(address(usdt0), recipient, AMOUNT, TX_ID, SRC_CHAIN, SRC_ADDR);
     }
 
     function test_fundsOut_revertsOnZeroRecipient() public {
         vm.prank(user);
-        bridge.fundsIn(_defaultParams());
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
 
-        vm.expectRevert(IBridge.InvalidRecipientAddress.selector);
-        vm.prank(owner);
-        bridge.fundsOut(address(token), address(0), AMOUNT, TX_ID, "bitcoin", DST_ADDRESS);
+        vm.expectRevert(BridgeBase.InvalidRecipientAddress.selector);
+        vm.prank(multisig);
+        bridge.fundsOut(address(usdt0), address(0), AMOUNT, TX_ID, SRC_CHAIN, SRC_ADDR);
     }
 
-    function test_fundsOut_revertsOnZeroTokenAddress() public {
-        vm.expectRevert(IBridge.InvalidTokenAddress.selector);
-        vm.prank(owner);
-        bridge.fundsOut(address(0), user, AMOUNT, TX_ID, "bitcoin", DST_ADDRESS);
-    }
-
-    function test_fundsOut_revertsIfAmountExceedsBalance() public {
+    function test_fundsOut_revertsOnWrongTokenAddress() public {
         vm.prank(user);
-        bridge.fundsIn(_defaultParams());
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
 
-        vm.expectRevert(IBridge.AmountExceedTokenBalance.selector);
-        vm.prank(owner);
-        bridge.fundsOut(address(token), user, AMOUNT + 1, TX_ID, "bitcoin", DST_ADDRESS);
+        address otherToken = makeAddr('otherToken');
+        vm.expectRevert(BridgeBase.InvalidTokenAddress.selector);
+        vm.prank(multisig);
+        bridge.fundsOut(otherToken, recipient, AMOUNT, TX_ID, SRC_CHAIN, SRC_ADDR);
     }
 
-    // =========================================================================
+    function test_fundsOut_revertsIfAmountExceedsPool() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+
+        vm.expectRevert(BridgeBase.AmountExceedBridgePool.selector);
+        vm.prank(multisig);
+        bridge.fundsOut(address(usdt0), recipient, AMOUNT + 1, TX_ID, SRC_CHAIN, SRC_ADDR);
+    }
+
+    // ========================================================================
+    // pause / unpause / renounceOwnership
+    // ========================================================================
+
+    function test_pause_onlyOwner() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        vm.prank(user);
+        bridge.pause();
+    }
+
+    function test_unpause_onlyOwner() public {
+        vm.prank(multisig);
+        bridge.pause();
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        vm.prank(user);
+        bridge.unpause();
+    }
+
+    function test_renounceOwnership_alwaysReverts() public {
+        vm.expectRevert(BridgeBase.RenounceOwnershipBlocked.selector);
+        vm.prank(multisig);
+        bridge.renounceOwnership();
+    }
+
+    // ========================================================================
+    // views
+    // ========================================================================
+
+    function test_getContractBalance() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+
+        assertEq(bridge.getContractBalance(), AMOUNT);
+    }
+
+    function test_getChainId() public view {
+        assertEq(bridge.getChainId(), block.chainid);
+    }
+
+    // ========================================================================
     // Fuzz
-    // =========================================================================
+    // ========================================================================
 
-    function testFuzz_fundsIn_validAmount(uint256 amount) public {
-        amount = bound(amount, 1, INITIAL_BALANCE);
-
-        FundsInParams memory params = _defaultParams();
-        params.amount = amount;
+    function testFuzz_fundsIn_validAmount(uint128 amount) public {
+        vm.assume(amount > 0);
+        usdt0.mint(user, amount);
 
         vm.prank(user);
-        bridge.fundsIn(params);
+        bridge.fundsIn(amount, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
 
-        assertEq(token.balanceOf(address(bridge)), amount);
-    }
-
-    function testFuzz_fundsOut_validAmount(uint256 amount) public {
-        amount = bound(amount, 1, INITIAL_BALANCE);
-
-        FundsInParams memory params = _defaultParams();
-        params.amount = amount;
-
-        vm.prank(user);
-        bridge.fundsIn(params);
-
-        address recipient = makeAddr("recipient");
-
-        vm.prank(owner);
-        bridge.fundsOut(address(token), recipient, amount, TX_ID, "bitcoin", DST_ADDRESS);
-
-        assertEq(token.balanceOf(recipient), amount);
+        assertEq(usdt0.balanceOf(address(bridge)), amount);
     }
 }
