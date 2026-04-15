@@ -138,7 +138,7 @@ contract CommissionManager is Ownable {
             uint256 netAmount
         )
     {
-        bytes32 ruleKey = keccak256(abi.encodePacked(sourceChain, destChain, token));
+        bytes32 ruleKey = buildRouteKey(sourceChain, destChain, token);
         CommissionConfig memory config = getEffectiveConfig(ruleKey);
 
         // Only calculate if this config is for FUNDS_IN
@@ -194,7 +194,7 @@ contract CommissionManager is Ownable {
             uint256 netAmount
         )
     {
-        bytes32 ruleKey = keccak256(abi.encodePacked(sourceChain, destChain, token));
+        bytes32 ruleKey = buildRouteKey(sourceChain, destChain, token);
         CommissionConfig memory config = getEffectiveConfig(ruleKey);
 
         // Only calculate if this config is for FUNDS_OUT
@@ -315,9 +315,7 @@ contract CommissionManager is Ownable {
         );
 
         // Build route key
-        bytes32 key = keccak256(
-            abi.encodePacked(sourceChain, destChain, token)
-        );
+        bytes32 key = buildRouteKey(sourceChain, destChain, token);
 
         commissionRules[key] = config;
         commissionRules[key].isSet = true;
@@ -336,9 +334,7 @@ contract CommissionManager is Ownable {
         string calldata destChain,
         address token
     ) external onlyOwner {
-        bytes32 key = keccak256(
-            abi.encodePacked(sourceChain, destChain, token)
-        );
+        bytes32 key = buildRouteKey(sourceChain, destChain, token);
         delete commissionRules[key];
         emit CommissionRuleCleared(sourceChain, destChain, token);
     }
@@ -421,9 +417,7 @@ contract CommissionManager is Ownable {
         string calldata destChain,
         address token
     ) external view returns (CommissionConfig memory) {
-        bytes32 ruleKey = keccak256(
-            abi.encodePacked(sourceChain, destChain, token)
-        );
+        bytes32 ruleKey = buildRouteKey(sourceChain, destChain, token);
         return commissionRules[ruleKey];
     }
 
