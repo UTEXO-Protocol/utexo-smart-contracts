@@ -52,7 +52,7 @@ contract CommissionManager is Ownable {
     address public bridgeAddress;
 
     // Global defaults (stored but not used in mock)
-    uint256 public globalStablePercent = 0; // Mock: Always 0%
+    uint256 public globalStablePercent = 400; // Mock: Always 0%
     uint256 public globalGasEstimate = 0;
     uint8 public globalMultiplier = 100;
     CommissionSide public globalSide = CommissionSide.FUNDS_IN;
@@ -62,7 +62,8 @@ contract CommissionManager is Ownable {
     uint256 private constant _MAX_STABLE_PERCENT = 9000; // 90%
     uint256 private constant _HUNDRED_PERCENT = 10000;
 
-    // Per-route overrides (stored but not used in mock)
+    // Per-route overrides
+    // key = keccak256(abi.encodePacked(sourceChain, destChain, tokenAddress))
     mapping(bytes32 => CommissionConfig) public commissionRules;
 
     // Accumulated fees (can still track even though fees are 0)
@@ -122,19 +123,24 @@ contract CommissionManager is Ownable {
     // ============ Core Calculation Functions (MOCKED - Always Return 0) ============
 
     /**
-     * @notice MOCK: Always returns 0 commission for fundsIn
-     * @dev Interface matches real CommissionManager but returns no fees
-     * @return tokenCommission Always 0
-     * @return nativeCommission Always 0
-     * @return netAmount Always equals input amount (no deduction)
+     * @notice Calculate commission for fundsIn operation
+     * @param sourceChain Source chain identifier
+     * @param destChain Destination chain identifier
+     * @param token Token address
+     * @param amount Amount being bridged
+     * @param tokenToNativeRate Oracle rate: wei per token unit
+     * @param tokenDecimals Token decimals
+     * @return tokenCommission Commission in token units
+     * @return nativeCommission Commission in native units (wei)
+     * @return netAmount Amount after commission deduction
      */
     function calculateFundsInCommission(
-        string calldata /* sourceChain */,
-        string calldata /* destChain */,
-        address /* token */,
+        string calldata sourceChain,
+        string calldata destChain,
+        address token,
         uint256 amount,
-        uint256 /* tokenToNativeRate */,
-        uint256 /* tokenDecimals */
+        uint256 tokenToNativeRate,
+        uint256 tokenDecimals
     )
         external
         pure
@@ -144,26 +150,53 @@ contract CommissionManager is Ownable {
             uint256 netAmount
         )
     {
-        // MOCK: Always return 0 commission
-        tokenCommission = 0;
-        nativeCommission = 0;
-        netAmount = amount; // Full amount passes through
+        bytes32 ruleKey = keccak256(abi.encodePacked(sourceChain, destChain, token));
+        CommissionConfig memory config = getEffectiveConfig(ruleKey);
+
+        // Only calculate if this config is for FUNDS_IN
+        if (config.side != CommissionSide.FUNDS_IN) {
+            return (0, 0, amount);
+        }
+
+        // Calculate stable fee in token units
+        uint256 stableFee = calculateStableFee(amount, config.stablePercent, config.multiplier);
+
+        if (config.currency == CommissionCurrency.TOKEN) {
+            // TOKEN commission: deduct from amount
+            tokenCommission = stableFee;
+            nativeCommission = 0;
+            netAmount = amount - tokenCommission;
+        } else {
+            // NATIVE commission: user pays in ETH/BNB via msg.value
+            tokenCommission = 0;
+            nativeCommission = calculateNativeCommission(
+                stableFee,
+                tokenToNativeRate,
+                tokenDecimals
+            );
+            netAmount = amount; // Full amount bridges
+        }
     }
 
     /**
-     * @notice MOCK: Always returns 0 commission for fundsOut
-     * @dev Interface matches real CommissionManager but returns no fees
-     * @return tokenCommission Always 0
-     * @return nativeCommission Always 0
-     * @return netAmount Always equals input amount (no deduction)
+     * @notice Calculate commission for fundsOut operation
+     * @param sourceChain Source chain identifier
+     * @param destChain Destination chain identifier
+     * @param token Token address
+     * @param amount Amount to be released
+     * @param tokenToNativeRate Oracle rate: wei per token unit (for native commission)
+     * @param tokenDecimals Token decimals
+     * @return tokenCommission Commission in token units
+     * @return nativeCommission Commission in native units (wei)
+     * @return netAmount Amount user receives after commission
      */
     function calculateFundsOutCommission(
-        string calldata /* sourceChain */,
-        string calldata /* destChain */,
-        address /* token */,
+        string calldata sourceChain,
+        string calldata destChain,
+        address token,
         uint256 amount,
-        uint256 /* tokenToNativeRate */,
-        uint256 /* tokenDecimals */
+        uint256 tokenToNativeRate,
+        uint256 tokenDecimals
     )
         external
         pure
@@ -173,43 +206,71 @@ contract CommissionManager is Ownable {
             uint256 netAmount
         )
     {
-        // MOCK: Always return 0 commission
-        tokenCommission = 0;
-        nativeCommission = 0;
-        netAmount = amount; // Full amount passes through
+        bytes32 ruleKey = keccak256(abi.encodePacked(sourceChain, destChain, token));
+        CommissionConfig memory config = getEffectiveConfig(ruleKey);
+
+        // Only calculate if this config is for FUNDS_OUT
+        if (config.side != CommissionSide.FUNDS_OUT) {
+            return (0, 0, amount);
+        }
+
+        // Calculate stable fee
+        uint256 stableFee = calculateStableFee(amount, config.stablePercent, config.multiplier);
+
+        if (config.currency == CommissionCurrency.TOKEN) {
+            tokenCommission = stableFee;
+            nativeCommission = 0;
+            netAmount = amount - tokenCommission;
+        } else {
+            // NATIVE commission for fundsOut: deduct equivalent from tokens
+            tokenCommission = 0;
+            nativeCommission = calculateNativeCommission(
+                stableFee,
+                tokenToNativeRate,
+                tokenDecimals
+            );
+            netAmount = amount;
+        }
     }
 
     /**
-     * @notice MOCK: Calculate stable fee (returns 0 for mock)
-     * @return Always 0
+     * @notice Calculate stable commission fee
+     * @param amount Token amount
+     * @param stablePercent Percent * 100 (e.g., 400 = 4%)
+     * @param multiplier Usually 100
+     * @return Fee in token units
      */
     function calculateStableFee(
-        uint256 /* amount */,
-        uint256 /* stablePercent */,
-        uint256 /* multiplier */
+        uint256 amount,
+        uint256 stablePercent,
+        uint256 multiplier
     ) public pure returns (uint256) {
-        return 0; // MOCK: No fee
+        return (amount * stablePercent) / multiplier / multiplier;
     }
 
     /**
-     * @notice MOCK: Convert token fee to native (returns 0 for mock)
-     * @return Always 0
+     * @notice Convert token fee to native currency
+     * @param tokenFee Fee amount in token units
+     * @param tokenToNativeRate Oracle rate: wei per token unit
+     * @param tokenDecimals Token decimals
+     * @return nativeFee Fee in native currency (wei)
      */
     function calculateNativeCommission(
-        uint256 /* amount */,
-        uint256 /* stablePercent */,
-        uint256 /* multiplier */,
-        uint256 /* tokenToNativeRate */,
-        uint256 /* tokenDecimals */
-    ) public pure returns (uint256) {
-        return 0; // MOCK: No fee
+        uint256 tokenFee,
+        uint256 tokenToNativeRate,
+        uint256 tokenDecimals
+    ) public pure returns (uint256 nativeFee) {
+        nativeFee = (tokenFee * tokenToNativeRate) / (10 ** tokenDecimals);
     }
 
     // ============ Configuration Functions (Stored but Not Used) ============
 
     /**
-     * @notice Set global default commission parameters (stored but not used in calculations)
-     * @dev Configuration is saved but mock always returns 0 commission
+     * @notice Set global default commission parameters
+     * @param stablePercent Default stable percent (e.g., 400 = 4%)
+     * @param multiplier Default multiplier (usually 100)
+     * @param side Default commission side (FUNDS_IN or FUNDS_OUT)
+     * @param currency Default commission currency (TOKEN or NATIVE)
      */
     function setGlobalDefaults(
         uint256 stablePercent,
@@ -225,6 +286,10 @@ contract CommissionManager is Ownable {
             multiplier > 0,
             "CommissionManager: Multiplier must be nonzero"
         );
+        require(
+            stablePercent > 0,
+            "CommissionManager: Percent must be nonzero"
+        );
 
         globalStablePercent = stablePercent;
         globalMultiplier = multiplier;
@@ -235,8 +300,11 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Set commission rule for a specific route (stored but not used in calculations)
-     * @dev Configuration is saved but mock always returns 0 commission
+     * @notice Set commission rule for a specific route
+     * @param sourceChain Source chain identifier
+     * @param destChain Destination chain identifier
+     * @param token Token address
+     * @param config Commission configuration
      */
     function setCommissionRule(
         string calldata sourceChain,
@@ -268,7 +336,10 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Clear route-specific config
+     * @notice Clear route-specific config (revert to global defaults)
+     * @param sourceChain Source chain identifier
+     * @param destChain Destination chain identifier
+     * @param token Token address
      */
     function clearCommissionRule(
         string calldata sourceChain,
@@ -284,6 +355,7 @@ contract CommissionManager is Ownable {
 
     /**
      * @notice Update bridge address
+     * @param newBridge New bridge contract address
      */
     function setBridgeAddress(address newBridge) external onlyOwner {
         require(
@@ -297,8 +369,9 @@ contract CommissionManager is Ownable {
     // ============ View Functions ============
 
     /**
-     * @notice Get effective configuration for a route
-     * @dev Returns stored config but doesn't affect calculations (always 0 commission)
+     * @notice Get effective configuration for a route (with fallback to globals)
+     * @param ruleKey Route key (keccak256 of sourceChain, destChain, token)
+     * @return Effective commission configuration
      */
     function getEffectiveConfig(
         bytes32 ruleKey
@@ -323,6 +396,10 @@ contract CommissionManager is Ownable {
 
     /**
      * @notice Get global default configuration
+     * @return stablePercent Global stable percent
+     * @return multiplier Global multiplier
+     * @return side Global commission side
+     * @return currency Global commission currency
      */
     function getGlobalDefaults()
         external
@@ -344,6 +421,10 @@ contract CommissionManager is Ownable {
 
     /**
      * @notice Get commission rule for a specific route
+     * @param sourceChain Source chain identifier
+     * @param destChain Destination chain identifier
+     * @param token Token address
+     * @return Commission configuration for the route
      */
     function getCommissionRule(
         string calldata sourceChain,
@@ -360,33 +441,35 @@ contract CommissionManager is Ownable {
 
     /**
      * @notice Receive token commission from bridge
-     * @dev Even though mock returns 0 fees, this allows tracking if bridge sends any
+     * @param token Token address
+     * @param amount Commission amount
      */
     function receiveTokenCommission(
         address token,
         uint256 amount
     ) external onlyBridge {
-        if (amount > 0) {
-            tokenCommissionPool[token] += amount;
-            emit TokenCommissionReceived(token, amount);
-        }
+        require (amount > 0, "CommissionManager: Amount must be positive");
+        tokenCommissionPool[token] += amount;
+        emit TokenCommissionReceived(token, amount);
     }
 
     /**
      * @notice Receive native commission from bridge
-     * @dev Even though mock returns 0 fees, this allows tracking if bridge sends any
+     * @dev Called via payable function or direct transfer
      */
     receive() external payable onlyBridge {
-        if (msg.value > 0) {
-            nativeCommissionPool += msg.value;
-            emit NativeCommissionReceived(msg.value);
-        }
+        require(msg.value > 0, "CommissionManager: Amount must be positive");
+        nativeCommissionPool += msg.value;
+        emit NativeCommissionReceived(msg.value);
     }
 
     // ============ Withdrawal Functions ============
 
     /**
      * @notice Withdraw token commission
+     * @param token Token address
+     * @param to Recipient address
+     * @param amount Amount to withdraw
      */
     function withdrawTokenCommission(
         address token,
@@ -407,6 +490,8 @@ contract CommissionManager is Ownable {
 
     /**
      * @notice Withdraw native commission
+     * @param to Recipient address
+     * @param amount Amount to withdraw
      */
     function withdrawNativeCommission(
         address payable to,
