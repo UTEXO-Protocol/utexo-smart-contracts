@@ -7,20 +7,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 /**
  * @title CommissionManager
- * @notice Mock implementation that returns 0% commission for all operations
- * @dev Use this for testing/development when you need CommissionManager interface but no actual fees
- *
- * Key Differences from Real CommissionManager:
- * - All commission calculations return 0 (no fees charged)
- * - Configuration functions work but don't affect calculations
- * - Events are still emitted for observability
- * - Same interface for drop-in replacement
- *
- * Use Cases:
- * - Testing Bridge contract without commission deductions
- * - Development environments
- * - Integration testing
- * - Temporary deployment before real CommissionManager is ready
+ * @notice Non-upgradeable commission calculation, configuration, and fee collection for the EVM bridge
+ * @dev Aligns with blueprint v3.2: global defaults + per-route overrides, full on-chain stable/native math
  */
 contract CommissionManager is Ownable {
     using SafeERC20 for IERC20;
@@ -28,12 +16,12 @@ contract CommissionManager is Ownable {
     // ============ Structs ============
 
     struct CommissionConfig {
-        uint256 stablePercent; // Stored but not used in calculations
-        uint256 gasEstimate; // Stored but not used in calculations
-        uint8 multiplier; // Stored but not used in calculations
-        CommissionSide side; // Stored but not used in calculations
-        CommissionCurrency currency; // Stored but not used in calculations
-        bool isSet; // Stored but not used in calculations
+        uint256 stablePercent; // Percent * 100 (e.g. 400 = 4%)
+        uint256 gasEstimate; // Reserved for future gas-based logic (blueprint field)
+        uint8 multiplier; // Usually 100
+        CommissionSide side; // FUNDS_IN or FUNDS_OUT
+        CommissionCurrency currency; // TOKEN or NATIVE
+        bool isSet; // true = explicit route rule; false = fall back to globals
     }
 
     // ============ Enums ============
@@ -51,8 +39,8 @@ contract CommissionManager is Ownable {
     // Bridge address (only bridge can send commissions)
     address public bridgeAddress;
 
-    // Global defaults (stored but not used in mock)
-    uint256 public globalStablePercent = 400; // Mock: Always 0%
+    // Global defaults (when route rule is not set)
+    uint256 public globalStablePercent = 400; // 4% default
     uint256 public globalGasEstimate = 0;
     uint8 public globalMultiplier = 100;
     CommissionSide public globalSide = CommissionSide.FUNDS_IN;
@@ -66,7 +54,7 @@ contract CommissionManager is Ownable {
     // key = keccak256(abi.encodePacked(sourceChain, destChain, tokenAddress))
     mapping(bytes32 => CommissionConfig) public commissionRules;
 
-    // Accumulated fees (can still track even though fees are 0)
+    // Accumulated fees
     mapping(address => uint256) public tokenCommissionPool;
     uint256 public nativeCommissionPool;
 
@@ -120,7 +108,7 @@ contract CommissionManager is Ownable {
         bridgeAddress = _bridgeAddress;
     }
 
-    // ============ Core Calculation Functions (MOCKED - Always Return 0) ============
+    // ============ Core Calculation Functions ============
 
     /**
      * @notice Calculate commission for fundsIn operation
@@ -169,7 +157,7 @@ contract CommissionManager is Ownable {
         } else {
             // NATIVE commission: user pays in ETH/BNB via msg.value
             tokenCommission = 0;
-            nativeCommission = calculateNativeCommission(
+            nativeCommission = convertTokenToNative(
                 stableFee,
                 tokenToNativeRate,
                 tokenDecimals
@@ -222,9 +210,9 @@ contract CommissionManager is Ownable {
             nativeCommission = 0;
             netAmount = amount - tokenCommission;
         } else {
-            // NATIVE commission for fundsOut: deduct equivalent from tokens
+            // NATIVE commission for fundsOut: user pays in native (per blueprint)
             tokenCommission = 0;
-            nativeCommission = calculateNativeCommission(
+            nativeCommission = convertTokenToNative(
                 stableFee,
                 tokenToNativeRate,
                 tokenDecimals
@@ -249,13 +237,13 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Convert token fee to native currency
-     * @param tokenFee Fee amount in token units
-     * @param tokenToNativeRate Oracle rate: wei per token unit
-     * @param tokenDecimals Token decimals
-     * @return nativeFee Fee in native currency (wei)
+     * @notice Convert token-denominated fee to native (wei) using oracle rate (blueprint: convertTokenToNative)
+     * @param tokenFee Fee amount in token smallest units
+     * @param tokenToNativeRate Wei per 1 token unit (smallest units), from oracle/signature
+     * @param tokenDecimals Token decimals (e.g. 6 for USDT)
+     * @return nativeFee Native amount in wei
      */
-    function calculateNativeCommission(
+    function convertTokenToNative(
         uint256 tokenFee,
         uint256 tokenToNativeRate,
         uint256 tokenDecimals
@@ -263,7 +251,7 @@ contract CommissionManager is Ownable {
         nativeFee = (tokenFee * tokenToNativeRate) / (10 ** tokenDecimals);
     }
 
-    // ============ Configuration Functions (Stored but Not Used) ============
+    // ============ Configuration Functions ============
 
     /**
      * @notice Set global default commission parameters
@@ -317,7 +305,10 @@ contract CommissionManager is Ownable {
             config.stablePercent <= _MAX_STABLE_PERCENT,
             "CommissionManager: Percent too high"
         );
-        require(config.stablePercent > 0, "Percent must be nonzero");
+        require(
+            config.stablePercent > 0,
+            "CommissionManager: Percent must be nonzero"
+        );
         require(
             config.multiplier > 0,
             "CommissionManager: Multiplier must be nonzero"
@@ -328,7 +319,6 @@ contract CommissionManager is Ownable {
             abi.encodePacked(sourceChain, destChain, token)
         );
 
-        // Store config (but won't be used in mock calculations)
         commissionRules[key] = config;
         commissionRules[key].isSet = true;
 
@@ -437,6 +427,17 @@ contract CommissionManager is Ownable {
         return commissionRules[ruleKey];
     }
 
+    /**
+     * @notice keccak256(abi.encodePacked(sourceChain, destChain, token))
+     */
+    function buildRouteKey(
+        string calldata sourceChain,
+        string calldata destChain,
+        address token
+    ) external pure returns (bytes32) {
+        return keccak256(abi.encodePacked(sourceChain, destChain, token));
+    }
+
     // ============ Commission Collection Functions ============
 
     /**
@@ -508,5 +509,32 @@ contract CommissionManager is Ownable {
         require(success, "CommissionManager: Native transfer failed");
 
         emit NativeCommissionWithdrawn(to, amount);
+    }
+
+    /**
+     * @notice Withdraw entire token commission balance for one token
+     */
+    function withdrawAllTokenCommission(address token, address to) external onlyOwner {
+        uint256 balance = tokenCommissionPool[token];
+        require(balance > 0, "CommissionManager: No balance");
+
+        tokenCommissionPool[token] = 0;
+        IERC20(token).safeTransfer(to, balance);
+
+        emit TokenCommissionWithdrawn(token, to, balance);
+    }
+
+    /**
+     * @notice Withdraw entire native commission balance
+     */
+    function withdrawAllNativeCommission(address payable to) external onlyOwner {
+        uint256 balance = nativeCommissionPool;
+        require(balance > 0, "CommissionManager: No balance");
+
+        nativeCommissionPool = 0;
+        (bool success, ) = to.call{value: balance}("");
+        require(success, "CommissionManager: Native transfer failed");
+
+        emit NativeCommissionWithdrawn(to, balance);
     }
 }
