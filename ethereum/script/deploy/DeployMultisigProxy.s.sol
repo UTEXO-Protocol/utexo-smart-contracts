@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.20;
+
+import { Script, console2 } from 'forge-std/Script.sol';
+import { MultisigProxy } from '../../src/MultisigProxy.sol';
+
+/// @title DeployMultisigProxy
+/// @notice Deploys MultisigProxy for an existing Bridge and optionally transfers
+///         Bridge ownership (call from the current Bridge owner instead if needed).
+///
+/// Env:
+///   PRIVATE_KEY           — deployer private key (must be Bridge owner if transferring)
+///   BRIDGE_ADDRESS        — existing Bridge deployment
+///   ENCLAVE_SIGNERS       — comma-separated TEE signer addresses
+///   ENCLAVE_THRESHOLD     — M for enclave M-of-N
+///   FEDERATION_SIGNERS    — comma-separated governance signer addresses
+///   FEDERATION_THRESHOLD  — M for federation M-of-N
+///   COMMISSION_RECIPIENT  — destination for withdrawCommission()
+///   TIMELOCK_DURATION     — seconds between propose and execute (e.g. 3600)
+///
+/// Usage:
+///   forge script script/deploy/DeployMultisigProxy.s.sol \
+///     --rpc-url $RPC_URL --broadcast --verify
+contract DeployMultisigProxy is Script {
+    function run() external returns (MultisigProxy proxy) {
+        uint256 pk = vm.envUint('PRIVATE_KEY');
+
+        address bridgeAddr  = vm.envAddress('BRIDGE_ADDRESS');
+        address[] memory enc = vm.envAddress('ENCLAVE_SIGNERS', ',');
+        uint256 encThr      = vm.envUint('ENCLAVE_THRESHOLD');
+        address[] memory fed = vm.envAddress('FEDERATION_SIGNERS', ',');
+        uint256 fedThr      = vm.envUint('FEDERATION_THRESHOLD');
+        address commission  = vm.envAddress('COMMISSION_RECIPIENT');
+        uint256 timelock    = vm.envUint('TIMELOCK_DURATION');
+
+        vm.startBroadcast(pk);
+        proxy = new MultisigProxy(
+            bridgeAddr,
+            enc, encThr,
+            fed, fedThr,
+            commission,
+            timelock
+        );
+        vm.stopBroadcast();
+
+        console2.log('MultisigProxy deployed at:', address(proxy));
+        console2.log('Bridge:                   ', proxy.bridge());
+        console2.log('Enclave threshold:        ', proxy.enclaveThreshold());
+        console2.log('Federation threshold:     ', proxy.federationThreshold());
+        console2.log('Commission recipient:     ', proxy.commissionRecipient());
+        console2.log('Timelock duration (sec):  ', proxy.timelockDuration());
+        console2.log('');
+        console2.log('Next step: transfer Bridge ownership to MultisigProxy');
+        console2.log('   cast send $BRIDGE_ADDRESS "transferOwnership(address)" ', address(proxy));
+    }
+}
