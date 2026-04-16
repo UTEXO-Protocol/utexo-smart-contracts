@@ -435,16 +435,22 @@ contract CommissionManager is Ownable {
 
     /**
      * @notice Receive token commission from bridge
+     * @dev Credits the actual ERC-20 balance increase since the last recorded pool for this token.
+     *      The bridge must transfer tokens to this contract before calling; the `amount` is not taken
+     *      from calldata so accounting matches real transfers (including fee-on-transfer tokens).
      * @param token Token address
-     * @param amount Commission amount
      */
-    function receiveTokenCommission(
-        address token,
-        uint256 amount
-    ) external onlyBridge {
-        require (amount > 0, "CommissionManager: Amount must be positive");
-        tokenCommissionPool[token] += amount;
-        emit TokenCommissionReceived(token, amount);
+    function receiveTokenCommission(address token) external onlyBridge {
+        uint256 newBalance = IERC20(token).balanceOf(address(this));
+        uint256 priorPool = tokenCommissionPool[token];
+        require(
+            newBalance >= priorPool,
+            "CommissionManager: balance below recorded pool"
+        );
+        uint256 recorded = newBalance - priorPool;
+        require(recorded > 0, "CommissionManager: nothing received");
+        tokenCommissionPool[token] = newBalance;
+        emit TokenCommissionReceived(token, recorded);
     }
 
     /**
