@@ -2,6 +2,7 @@
 pragma solidity 0.8.20;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -11,7 +12,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  * @notice Non-upgradeable commission calculation, configuration, and fee collection for the EVM bridge
  * @dev Aligns with blueprint v3: global defaults + per-route overrides, full on-chain stable/native math
  */
-contract CommissionManager is Ownable {
+contract CommissionManager is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ============ Structs ============
@@ -509,7 +510,7 @@ contract CommissionManager is Ownable {
         address token,
         address to,
         uint256 amount
-    ) external onlyOwner {
+    ) external onlyOwner nonReentrant {
         if (token == address(0)) revert InvalidToken();
         if (to == address(0)) revert InvalidRecipient();
         if (tokenCommissionPool[token] < amount) revert InsufficientBalance();
@@ -528,7 +529,7 @@ contract CommissionManager is Ownable {
     function withdrawNativeCommission(
         address payable to,
         uint256 amount
-    ) external onlyOwner {
+    ) external onlyOwner nonReentrant {
         if (to == address(0)) revert InvalidRecipient();
         if (nativeCommissionPool < amount) revert InsufficientBalance();
 
@@ -542,7 +543,7 @@ contract CommissionManager is Ownable {
     /**
      * @notice Withdraw entire token commission balance for one token
      */
-    function withdrawAllTokenCommission(address token, address to) external onlyOwner {
+    function withdrawAllTokenCommission(address token, address to) external onlyOwner nonReentrant {
         if (token == address(0)) revert InvalidToken();
         if (to == address(0)) revert InvalidRecipient();
         uint256 balance = tokenCommissionPool[token];
@@ -557,7 +558,7 @@ contract CommissionManager is Ownable {
     /**
      * @notice Withdraw entire native commission balance
      */
-    function withdrawAllNativeCommission(address payable to) external onlyOwner {
+    function withdrawAllNativeCommission(address payable to) external onlyOwner nonReentrant {
         if (to == address(0)) revert InvalidRecipient();
         uint256 balance = nativeCommissionPool;
         if (balance == 0) revert NoBalance();
