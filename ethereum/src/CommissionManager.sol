@@ -18,7 +18,6 @@ contract CommissionManager is Ownable {
 
     struct CommissionConfig {
         uint256 stablePercent; // Percent * 100 (e.g. 400 = 4%)
-        uint256 gasEstimate; // Reserved for future gas-based logic (blueprint field)
         uint8 multiplier; // Usually 100
         CommissionSide side; // FUNDS_IN or FUNDS_OUT
         CommissionCurrency currency; // TOKEN or NATIVE
@@ -35,6 +34,24 @@ contract CommissionManager is Ownable {
         NATIVE
     }
 
+    // ============ Errors ============
+
+    error OnlyBridge();
+    error InvalidBridgeAddress();
+    error InvalidToken();
+    error InvalidRecipient();
+    error StablePercentTooHigh();
+    error StablePercentZero();
+    error MultiplierZero();
+    error MockTokenToNativeRateNotSet();
+    error TokenDecimalsUnavailable();
+    error BalanceBelowRecordedPool();
+    error NothingReceived();
+    error ZeroNativeAmount();
+    error InsufficientBalance();
+    error NativeTransferFailed();
+    error NoBalance();
+
     // ============ State Variables ============
 
     // Bridge address (only bridge can send commissions)
@@ -42,7 +59,6 @@ contract CommissionManager is Ownable {
 
     // Global defaults (when route rule is not set)
     uint256 public globalStablePercent = 400; // 4% default
-    uint256 public globalGasEstimate = 0;
     uint8 public globalMultiplier = 100;
     CommissionSide public globalSide = CommissionSide.FUNDS_IN;
     CommissionCurrency public globalCurrency = CommissionCurrency.TOKEN;
@@ -103,17 +119,14 @@ contract CommissionManager is Ownable {
     // ============ Modifiers ============
 
     modifier onlyBridge() {
-        require(msg.sender == bridgeAddress, "CommissionManager: Only bridge");
+        if (msg.sender != bridgeAddress) revert OnlyBridge();
         _;
     }
 
     // ============ Constructor ============
 
     constructor(address _bridgeAddress) Ownable(msg.sender) {
-        require(
-            _bridgeAddress != address(0),
-            "CommissionManager: Invalid bridge address"
-        );
+        if (_bridgeAddress == address(0)) revert InvalidBridgeAddress();
         bridgeAddress = _bridgeAddress;
     }
 
@@ -164,7 +177,7 @@ contract CommissionManager is Ownable {
             // NATIVE commission: user pays in ETH/BNB via msg.value
             tokenCommission = 0;
             uint256 rate = resolvedMockTokenToNativeRate(token);
-            require(rate > 0, "CommissionManager: mock token to native rate not set");
+            if (rate == 0) revert MockTokenToNativeRateNotSet();
             nativeCommission = convertTokenToNative(
                 stableFee,
                 rate,
@@ -218,7 +231,7 @@ contract CommissionManager is Ownable {
             // NATIVE commission for fundsOut: user pays in native (per blueprint)
             tokenCommission = 0;
             uint256 rate = resolvedMockTokenToNativeRate(token);
-            require(rate > 0, "CommissionManager: mock token to native rate not set");
+            if (rate == 0) revert MockTokenToNativeRateNotSet();
             nativeCommission = convertTokenToNative(
                 stableFee,
                 rate,
@@ -271,7 +284,7 @@ contract CommissionManager is Ownable {
         try IERC20Metadata(token).decimals() returns (uint8 d) {
             return uint256(d);
         } catch {
-            revert("CommissionManager: decimals unavailable");
+            revert TokenDecimalsUnavailable();
         }
     }
 
@@ -290,18 +303,9 @@ contract CommissionManager is Ownable {
         CommissionSide side,
         CommissionCurrency currency
     ) external onlyOwner {
-        require(
-            stablePercent <= _MAX_STABLE_PERCENT,
-            "CommissionManager: Percent too high"
-        );
-        require(
-            multiplier > 0,
-            "CommissionManager: Multiplier must be nonzero"
-        );
-        require(
-            stablePercent > 0,
-            "CommissionManager: Percent must be nonzero"
-        );
+        if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
+        if (multiplier == 0) revert MultiplierZero();
+        if (stablePercent == 0) revert StablePercentZero();
 
         globalStablePercent = stablePercent;
         globalMultiplier = multiplier;
@@ -323,7 +327,7 @@ contract CommissionManager is Ownable {
      * @notice Set per-token mock rate; pass 0 to clear and use global `mockTokenToNativeRate`.
      */
     function setMockTokenToNativeRateForToken(address token, uint256 rate) external onlyOwner {
-        require(token != address(0), "CommissionManager: Invalid token");
+        if (token == address(0)) revert InvalidToken();
         mockTokenToNativeRateForToken[token] = rate;
         emit MockTokenToNativeRateForTokenUpdated(token, rate);
     }
@@ -341,20 +345,11 @@ contract CommissionManager is Ownable {
         address token,
         CommissionConfig calldata config
     ) external onlyOwner {
-        require(token != address(0), "CommissionManager: Invalid token");
+        if (token == address(0)) revert InvalidToken();
         // Validate config
-        require(
-            config.stablePercent <= _MAX_STABLE_PERCENT,
-            "CommissionManager: Percent too high"
-        );
-        require(
-            config.stablePercent > 0,
-            "CommissionManager: Percent must be nonzero"
-        );
-        require(
-            config.multiplier > 0,
-            "CommissionManager: Multiplier must be nonzero"
-        );
+        if (config.stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
+        if (config.stablePercent == 0) revert StablePercentZero();
+        if (config.multiplier == 0) revert MultiplierZero();
 
         // Build route key
         bytes32 key = buildRouteKey(sourceChain, destChain, token);
@@ -376,7 +371,7 @@ contract CommissionManager is Ownable {
         string calldata destChain,
         address token
     ) external onlyOwner {
-        require(token != address(0), "CommissionManager: Invalid token");
+        if (token == address(0)) revert InvalidToken();
         bytes32 key = buildRouteKey(sourceChain, destChain, token);
         delete commissionRules[key];
         emit CommissionRuleCleared(sourceChain, destChain, token);
@@ -387,10 +382,7 @@ contract CommissionManager is Ownable {
      * @param newBridge New bridge contract address
      */
     function setBridgeAddress(address newBridge) external onlyOwner {
-        require(
-            newBridge != address(0),
-            "CommissionManager: Invalid bridge address"
-        );
+        if (newBridge == address(0)) revert InvalidBridgeAddress();
         bridgeAddress = newBridge;
         emit BridgeAddressUpdated(newBridge);
     }
@@ -415,7 +407,6 @@ contract CommissionManager is Ownable {
         return
             CommissionConfig({
                 stablePercent: globalStablePercent,
-                gasEstimate: globalGasEstimate,
                 multiplier: globalMultiplier,
                 side: globalSide,
                 currency: globalCurrency,
@@ -486,15 +477,12 @@ contract CommissionManager is Ownable {
      * @param token Token address
      */
     function receiveTokenCommission(address token) external onlyBridge {
-        require(token != address(0), "CommissionManager: Invalid token");
+        if (token == address(0)) revert InvalidToken();
         uint256 newBalance = IERC20(token).balanceOf(address(this));
         uint256 priorPool = tokenCommissionPool[token];
-        require(
-            newBalance >= priorPool,
-            "CommissionManager: balance below recorded pool"
-        );
+        if (newBalance < priorPool) revert BalanceBelowRecordedPool();
         uint256 recorded = newBalance - priorPool;
-        require(recorded > 0, "CommissionManager: nothing received");
+        if (recorded == 0) revert NothingReceived();
         tokenCommissionPool[token] = newBalance;
         emit TokenCommissionReceived(token, recorded);
     }
@@ -504,7 +492,7 @@ contract CommissionManager is Ownable {
      * @dev Called via payable function or direct transfer
      */
     receive() external payable onlyBridge {
-        require(msg.value > 0, "CommissionManager: Amount must be positive");
+        if (msg.value == 0) revert ZeroNativeAmount();
         nativeCommissionPool += msg.value;
         emit NativeCommissionReceived(msg.value);
     }
@@ -522,12 +510,9 @@ contract CommissionManager is Ownable {
         address to,
         uint256 amount
     ) external onlyOwner {
-        require(token != address(0), "CommissionManager: Invalid token");
-        require(to != address(0), "CommissionManager: Invalid recipient");
-        require(
-            tokenCommissionPool[token] >= amount,
-            "CommissionManager: Insufficient balance"
-        );
+        if (token == address(0)) revert InvalidToken();
+        if (to == address(0)) revert InvalidRecipient();
+        if (tokenCommissionPool[token] < amount) revert InsufficientBalance();
 
         tokenCommissionPool[token] -= amount;
         IERC20(token).safeTransfer(to, amount);
@@ -544,15 +529,12 @@ contract CommissionManager is Ownable {
         address payable to,
         uint256 amount
     ) external onlyOwner {
-        require(to != address(0), "CommissionManager: Invalid recipient");
-        require(
-            nativeCommissionPool >= amount,
-            "CommissionManager: Insufficient balance"
-        );
+        if (to == address(0)) revert InvalidRecipient();
+        if (nativeCommissionPool < amount) revert InsufficientBalance();
 
         nativeCommissionPool -= amount;
         (bool success, ) = to.call{value: amount}("");
-        require(success, "CommissionManager: Native transfer failed");
+        if (!success) revert NativeTransferFailed();
 
         emit NativeCommissionWithdrawn(to, amount);
     }
@@ -561,10 +543,10 @@ contract CommissionManager is Ownable {
      * @notice Withdraw entire token commission balance for one token
      */
     function withdrawAllTokenCommission(address token, address to) external onlyOwner {
-        require(token != address(0), "CommissionManager: Invalid token");
-        require(to != address(0), "CommissionManager: Invalid recipient");
+        if (token == address(0)) revert InvalidToken();
+        if (to == address(0)) revert InvalidRecipient();
         uint256 balance = tokenCommissionPool[token];
-        require(balance > 0, "CommissionManager: No balance");
+        if (balance == 0) revert NoBalance();
 
         tokenCommissionPool[token] = 0;
         IERC20(token).safeTransfer(to, balance);
@@ -576,13 +558,13 @@ contract CommissionManager is Ownable {
      * @notice Withdraw entire native commission balance
      */
     function withdrawAllNativeCommission(address payable to) external onlyOwner {
-        require(to != address(0), "CommissionManager: Invalid recipient");
+        if (to == address(0)) revert InvalidRecipient();
         uint256 balance = nativeCommissionPool;
-        require(balance > 0, "CommissionManager: No balance");
+        if (balance == 0) revert NoBalance();
 
         nativeCommissionPool = 0;
         (bool success, ) = to.call{value: balance}("");
-        require(success, "CommissionManager: Native transfer failed");
+        if (!success) revert NativeTransferFailed();
 
         emit NativeCommissionWithdrawn(to, balance);
     }
