@@ -7,6 +7,13 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+import {
+    CommissionConfig,
+    CommissionCurrency,
+    CommissionSide,
+    ICommissionManager
+} from "./interfaces/ICommissionManager.sol";
+
 /**
  * @title CommissionManager
  * @author UTEXO bridge stack
@@ -25,76 +32,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *      `owner` configures rules and withdraws accumulated pools. `renounceOwnership` is disabled.
  *      Withdrawals use `nonReentrant` against reentrancy via ERC-20 hooks or native recipients.
  */
-contract CommissionManager is Ownable, ReentrancyGuard {
+contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
     using SafeERC20 for IERC20;
-
-    // ============ Structs ============
-
-    /**
-     * @notice Stored commission parameters for one route (see `buildRouteKey`).
-     * @dev `isSet` distinguishes an explicit `commissionRules` entry from unset storage (all zeros).
-     */
-    struct CommissionConfig {
-        /// @notice Fee percent × 100 (e.g. 400 = 4%). Must be ≤ 9000 and > 0 when validated.
-        uint256 stablePercent;
-        /// @notice Divisor in `calculateStableFee`; typically 100.
-        uint8 multiplier;
-        /// @notice Whether this route’s fee applies to funds-in or funds-out quotes.
-        CommissionSide side;
-        /// @notice Fee in token units, or native (via mock rate) when `NATIVE`.
-        CommissionCurrency currency;
-        /// @notice True when this struct is an active per-route override; false for a cleared raw slot.
-        bool isSet;
-    }
-
-    // ============ Enums ============
-
-    /// @notice Which bridge operation this route’s fee is tied to (must match the calculator used).
-    enum CommissionSide {
-        FUNDS_IN,
-        FUNDS_OUT
-    }
-
-    /// @notice Take fee from bridged token amount or express it in native wei.
-    enum CommissionCurrency {
-        TOKEN,
-        NATIVE
-    }
-
-    // ============ Errors ============
-
-    /// @notice Caller is not `bridgeAddress`.
-    error OnlyBridge();
-    /// @notice Bridge address argument is zero.
-    error InvalidBridgeAddress();
-    /// @notice Token address is zero where forbidden.
-    error InvalidToken();
-    /// @notice Recipient address is zero.
-    error InvalidRecipient();
-    /// @notice `stablePercent` exceeds maximum (90%).
-    error StablePercentTooHigh();
-    /// @notice `stablePercent` is zero where forbidden.
-    error StablePercentZero();
-    /// @notice `multiplier` is zero.
-    error MultiplierZero();
-    /// @notice NATIVE currency configured but resolved mock rate is zero.
-    error MockTokenToNativeRateNotSet();
-    /// @notice `IERC20Metadata.decimals()` reverted or missing.
-    error TokenDecimalsUnavailable();
-    /// @notice ERC-20 balance is below recorded pool.
-    error BalanceBelowRecordedPool();
-    /// @notice No net tokens received since last pool snapshot.
-    error NothingReceived();
-    /// @notice Native `receive()` with zero value.
-    error ZeroNativeAmount();
-    /// @notice Withdrawal exceeds accrued pool.
-    error InsufficientBalance();
-    /// @notice Native transfer to recipient failed.
-    error NativeTransferFailed();
-    /// @notice Full withdrawal with zero accrued balance.
-    error NoBalance();
-    /// @notice `renounceOwnership` is disabled.
-    error RenounceOwnershipBlocked();
 
     // ============ State Variables ============
 
@@ -126,56 +65,6 @@ contract CommissionManager is Ownable, ReentrancyGuard {
     /// @notice Per-token mock rate; zero means use `mockTokenToNativeRate`.
     mapping(address => uint256) public mockTokenToNativeRateForToken;
 
-    // ============ Events ============
-
-    /// @notice Emitted when `setBridgeAddress` runs.
-    /// @param newBridge New bridge address.
-    event BridgeAddressUpdated(address indexed newBridge);
-
-    /// @notice Emitted when global defaults change.
-    event GlobalDefaultsUpdated(
-        uint256 stablePercent,
-        uint8 multiplier,
-        CommissionSide side,
-        CommissionCurrency currency
-    );
-
-    /// @notice Emitted when a route rule is stored.
-    event CommissionRuleUpdated(
-        string sourceChain,
-        string destChain,
-        address indexed token,
-        CommissionConfig config
-    );
-
-    /// @notice Emitted when a route rule is removed (globals apply again).
-    event CommissionRuleCleared(
-        string sourceChain,
-        string destChain,
-        address indexed token
-    );
-
-    /// @notice Token commission credited from the bridge.
-    /// @param token ERC-20 token.
-    /// @param amount Net increase credited this call.
-    event TokenCommissionReceived(address indexed token, uint256 amount);
-    /// @notice Native commission received from the bridge.
-    event NativeCommissionReceived(uint256 amount);
-
-    /// @notice Global mock rate updated.
-    event MockTokenToNativeRateUpdated(uint256 rate);
-    /// @notice Per-token mock rate updated.
-    event MockTokenToNativeRateForTokenUpdated(address indexed token, uint256 rate);
-
-    /// @notice Owner withdrew token commission.
-    event TokenCommissionWithdrawn(
-        address indexed token,
-        address indexed to,
-        uint256 amount
-    );
-    /// @notice Owner withdrew native commission.
-    event NativeCommissionWithdrawn(address indexed to, uint256 amount);
-
     // ============ Modifiers ============
 
     /// @dev Restricts call to `bridgeAddress`.
@@ -197,7 +86,7 @@ contract CommissionManager is Ownable, ReentrancyGuard {
 
     /// @inheritdoc Ownable
     /// @notice Always reverts. Use `transferOwnership` to change admin.
-    function renounceOwnership() public view override onlyOwner {
+    function renounceOwnership() public view override(Ownable) onlyOwner {
         revert RenounceOwnershipBlocked();
     }
 
