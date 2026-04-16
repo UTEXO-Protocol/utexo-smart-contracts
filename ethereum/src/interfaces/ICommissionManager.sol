@@ -39,7 +39,6 @@ interface ICommissionManager {
     error InvalidToken();
     error InvalidRecipient();
     error StablePercentTooHigh();
-    error StablePercentZero();
     error MultiplierZero();
     error MockTokenToNativeRateNotSet();
     error TokenDecimalsUnavailable();

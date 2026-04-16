@@ -40,8 +40,8 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
     /// @notice Address allowed to credit token and native commission.
     address public bridgeAddress;
 
-    /// @notice Default `stablePercent` when no per-route rule exists (×100; default 400 = 4%).
-    uint256 public globalStablePercent = 400;
+    /// @notice Default `stablePercent` when no per-route rule exists (×100; 0 = no % fee until configured).
+    uint256 public globalStablePercent = 0;
     /// @notice Default `multiplier` for `calculateStableFee` (typically 100).
     uint8 public globalMultiplier = 100;
     /// @notice Default `side` for routes without an override.
@@ -137,13 +137,17 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
         } else {
             // NATIVE commission: user pays in ETH/BNB via msg.value
             tokenCommission = 0;
-            uint256 rate = resolvedMockTokenToNativeRate(token);
-            if (rate == 0) revert MockTokenToNativeRateNotSet();
-            nativeCommission = convertTokenToNative(
-                stableFee,
-                rate,
-                _tokenDecimals(token)
-            );
+            if (stableFee == 0) {
+                nativeCommission = 0;
+            } else {
+                uint256 rate = resolvedMockTokenToNativeRate(token);
+                if (rate == 0) revert MockTokenToNativeRateNotSet();
+                nativeCommission = convertTokenToNative(
+                    stableFee,
+                    rate,
+                    _tokenDecimals(token)
+                );
+            }
             netAmount = amount; // Full amount bridges
         }
     }
@@ -191,13 +195,17 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
         } else {
             // NATIVE commission for fundsOut: user pays in native (per blueprint)
             tokenCommission = 0;
-            uint256 rate = resolvedMockTokenToNativeRate(token);
-            if (rate == 0) revert MockTokenToNativeRateNotSet();
-            nativeCommission = convertTokenToNative(
-                stableFee,
-                rate,
-                _tokenDecimals(token)
-            );
+            if (stableFee == 0) {
+                nativeCommission = 0;
+            } else {
+                uint256 rate = resolvedMockTokenToNativeRate(token);
+                if (rate == 0) revert MockTokenToNativeRateNotSet();
+                nativeCommission = convertTokenToNative(
+                    stableFee,
+                    rate,
+                    _tokenDecimals(token)
+                );
+            }
             netAmount = amount;
         }
     }
@@ -261,7 +269,7 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
 
     /**
      * @notice Sets defaults used when no per-route rule exists for a key.
-     * @param stablePercent Percent × 100; must be > 0 and ≤ 9000.
+     * @param stablePercent Percent × 100 (0 = no stable % fee); must be ≤ 9000.
      * @param multiplier Default multiplier (typically 100).
      * @param side Default `FUNDS_IN` vs `FUNDS_OUT`.
      * @param currency Default `TOKEN` vs `NATIVE`.
@@ -274,7 +282,6 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
     ) external onlyOwner {
         if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (multiplier == 0) revert MultiplierZero();
-        if (stablePercent == 0) revert StablePercentZero();
 
         globalStablePercent = stablePercent;
         globalMultiplier = multiplier;
@@ -320,7 +327,6 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
         if (token == address(0)) revert InvalidToken();
         // Validate config
         if (config.stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
-        if (config.stablePercent == 0) revert StablePercentZero();
         if (config.multiplier == 0) revert MultiplierZero();
 
         // Build route key
