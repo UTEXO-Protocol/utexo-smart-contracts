@@ -3,6 +3,7 @@ pragma solidity 0.8.20;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
@@ -57,6 +58,11 @@ contract CommissionManager is Ownable {
     mapping(address => uint256) public tokenCommissionPool;
     uint256 public nativeCommissionPool;
 
+    /// @dev Mock wei-per-token-unit rate for NATIVE commission; used when `mockTokenToNativeRateForToken[token]` is zero.
+    uint256 public mockTokenToNativeRate;
+    /// @dev Optional per-token mock; zero means use `mockTokenToNativeRate`.
+    mapping(address => uint256) public mockTokenToNativeRateForToken;
+
     // ============ Events ============
 
     event BridgeAddressUpdated(address indexed newBridge);
@@ -83,6 +89,10 @@ contract CommissionManager is Ownable {
 
     event TokenCommissionReceived(address indexed token, uint256 amount);
     event NativeCommissionReceived(uint256 amount);
+
+    event MockTokenToNativeRateUpdated(uint256 rate);
+    event MockTokenToNativeRateForTokenUpdated(address indexed token, uint256 rate);
+
     event TokenCommissionWithdrawn(
         address indexed token,
         address indexed to,
@@ -115,19 +125,16 @@ contract CommissionManager is Ownable {
      * @param destChain Destination chain identifier
      * @param token Token address
      * @param amount Amount being bridged
-     * @param tokenToNativeRate Oracle rate: wei per token unit
-     * @param tokenDecimals Token decimals
      * @return tokenCommission Commission in token units
      * @return nativeCommission Commission in native units (wei)
      * @return netAmount Amount after commission deduction
+     * @dev Token decimals are read from the token via ERC-20 metadata. Native commission uses owner-set mock rates.
      */
     function calculateFundsInCommission(
         string calldata sourceChain,
         string calldata destChain,
         address token,
-        uint256 amount,
-        uint256 tokenToNativeRate,
-        uint256 tokenDecimals
+        uint256 amount
     )
         external
         view
@@ -156,10 +163,12 @@ contract CommissionManager is Ownable {
         } else {
             // NATIVE commission: user pays in ETH/BNB via msg.value
             tokenCommission = 0;
+            uint256 rate = resolvedMockTokenToNativeRate(token);
+            require(rate > 0, "CommissionManager: mock token to native rate not set");
             nativeCommission = convertTokenToNative(
                 stableFee,
-                tokenToNativeRate,
-                tokenDecimals
+                rate,
+                _tokenDecimals(token)
             );
             netAmount = amount; // Full amount bridges
         }
@@ -171,19 +180,16 @@ contract CommissionManager is Ownable {
      * @param destChain Destination chain identifier
      * @param token Token address
      * @param amount Amount to be released
-     * @param tokenToNativeRate Oracle rate: wei per token unit (for native commission)
-     * @param tokenDecimals Token decimals
      * @return tokenCommission Commission in token units
      * @return nativeCommission Commission in native units (wei)
      * @return netAmount Amount user receives after commission
+     * @dev See `calculateFundsInCommission` for decimals and native rate sourcing.
      */
     function calculateFundsOutCommission(
         string calldata sourceChain,
         string calldata destChain,
         address token,
-        uint256 amount,
-        uint256 tokenToNativeRate,
-        uint256 tokenDecimals
+        uint256 amount
     )
         external
         view
@@ -211,10 +217,12 @@ contract CommissionManager is Ownable {
         } else {
             // NATIVE commission for fundsOut: user pays in native (per blueprint)
             tokenCommission = 0;
+            uint256 rate = resolvedMockTokenToNativeRate(token);
+            require(rate > 0, "CommissionManager: mock token to native rate not set");
             nativeCommission = convertTokenToNative(
                 stableFee,
-                tokenToNativeRate,
-                tokenDecimals
+                rate,
+                _tokenDecimals(token)
             );
             netAmount = amount;
         }
@@ -236,18 +244,35 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Convert token-denominated fee to native (wei) using oracle rate (blueprint: convertTokenToNative)
+     * @notice Convert token-denominated fee to native (wei) (blueprint: convertTokenToNative)
      * @param tokenFee Fee amount in token smallest units
-     * @param tokenToNativeRate Wei per 1 token unit (smallest units), from oracle/signature
+     * @param rateWeiPerTokenUnit Wei per 1 whole token in smallest units, matching mock rate units
      * @param tokenDecimals Token decimals (e.g. 6 for USDT)
      * @return nativeFee Native amount in wei
      */
     function convertTokenToNative(
         uint256 tokenFee,
-        uint256 tokenToNativeRate,
+        uint256 rateWeiPerTokenUnit,
         uint256 tokenDecimals
     ) public pure returns (uint256 nativeFee) {
-        nativeFee = (tokenFee * tokenToNativeRate) / (10 ** tokenDecimals);
+        nativeFee = (tokenFee * rateWeiPerTokenUnit) / (10 ** tokenDecimals);
+    }
+
+    /**
+     * @notice Resolved mock rate for `token` (per-token mock if set, else global mock).
+     */
+    function resolvedMockTokenToNativeRate(address token) public view returns (uint256) {
+        uint256 r = mockTokenToNativeRateForToken[token];
+        if (r != 0) return r;
+        return mockTokenToNativeRate;
+    }
+
+    function _tokenDecimals(address token) internal view returns (uint256) {
+        try IERC20Metadata(token).decimals() returns (uint8 d) {
+            return uint256(d);
+        } catch {
+            revert("CommissionManager: decimals unavailable");
+        }
     }
 
     // ============ Configuration Functions ============
@@ -284,6 +309,23 @@ contract CommissionManager is Ownable {
         globalCurrency = currency;
 
         emit GlobalDefaultsUpdated(stablePercent, multiplier, side, currency);
+    }
+
+    /**
+     * @notice Set global mock wei-per-token rate for NATIVE commission (used when per-token mock is unset).
+     */
+    function setMockTokenToNativeRate(uint256 rate) external onlyOwner {
+        mockTokenToNativeRate = rate;
+        emit MockTokenToNativeRateUpdated(rate);
+    }
+
+    /**
+     * @notice Set per-token mock rate; pass 0 to clear and use global `mockTokenToNativeRate`.
+     */
+    function setMockTokenToNativeRateForToken(address token, uint256 rate) external onlyOwner {
+        require(token != address(0), "CommissionManager: Invalid token");
+        mockTokenToNativeRateForToken[token] = rate;
+        emit MockTokenToNativeRateForTokenUpdated(token, rate);
     }
 
     /**
