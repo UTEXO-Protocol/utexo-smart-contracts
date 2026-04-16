@@ -50,7 +50,7 @@ contract CommissionManager is Ownable {
     uint256 private constant _MAX_STABLE_PERCENT = 9000; // 90%
 
     // Per-route overrides
-    // key = keccak256(abi.encodePacked(sourceChain, destChain, tokenAddress))
+    // key = keccak256(abi.encode(sourceChain, destChain, tokenAddress))
     mapping(bytes32 => CommissionConfig) public commissionRules;
 
     // Accumulated fees
@@ -421,14 +421,15 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice keccak256(abi.encodePacked(sourceChain, destChain, token))
+     * @notice keccak256(abi.encode(sourceChain, destChain, token))
+     * @dev Uses abi.encode (not encodePacked) so dynamic string arguments cannot be concatenated ambiguously.
      */
     function buildRouteKey(
         string calldata sourceChain,
         string calldata destChain,
         address token
     ) public pure returns (bytes32) {
-        return keccak256(abi.encodePacked(sourceChain, destChain, token));
+        return keccak256(abi.encode(sourceChain, destChain, token));
     }
 
     // ============ Commission Collection Functions ============
