@@ -341,6 +341,7 @@ contract CommissionManager is Ownable {
         address token,
         CommissionConfig calldata config
     ) external onlyOwner {
+        require(token != address(0), "CommissionManager: Invalid token");
         // Validate config
         require(
             config.stablePercent <= _MAX_STABLE_PERCENT,
@@ -375,6 +376,7 @@ contract CommissionManager is Ownable {
         string calldata destChain,
         address token
     ) external onlyOwner {
+        require(token != address(0), "CommissionManager: Invalid token");
         bytes32 key = buildRouteKey(sourceChain, destChain, token);
         delete commissionRules[key];
         emit CommissionRuleCleared(sourceChain, destChain, token);
@@ -484,6 +486,7 @@ contract CommissionManager is Ownable {
      * @param token Token address
      */
     function receiveTokenCommission(address token) external onlyBridge {
+        require(token != address(0), "CommissionManager: Invalid token");
         uint256 newBalance = IERC20(token).balanceOf(address(this));
         uint256 priorPool = tokenCommissionPool[token];
         require(
@@ -519,6 +522,7 @@ contract CommissionManager is Ownable {
         address to,
         uint256 amount
     ) external onlyOwner {
+        require(token != address(0), "CommissionManager: Invalid token");
         require(to != address(0), "CommissionManager: Invalid recipient");
         require(
             tokenCommissionPool[token] >= amount,
@@ -557,6 +561,8 @@ contract CommissionManager is Ownable {
      * @notice Withdraw entire token commission balance for one token
      */
     function withdrawAllTokenCommission(address token, address to) external onlyOwner {
+        require(token != address(0), "CommissionManager: Invalid token");
+        require(to != address(0), "CommissionManager: Invalid recipient");
         uint256 balance = tokenCommissionPool[token];
         require(balance > 0, "CommissionManager: No balance");
 
@@ -570,6 +576,7 @@ contract CommissionManager is Ownable {
      * @notice Withdraw entire native commission balance
      */
     function withdrawAllNativeCommission(address payable to) external onlyOwner {
+        require(to != address(0), "CommissionManager: Invalid recipient");
         uint256 balance = nativeCommissionPool;
         require(balance > 0, "CommissionManager: No balance");
 
