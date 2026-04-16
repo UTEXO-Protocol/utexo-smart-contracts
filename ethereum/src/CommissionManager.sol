@@ -8,7 +8,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /**
  * @title CommissionManager
  * @notice Non-upgradeable commission calculation, configuration, and fee collection for the EVM bridge
- * @dev Aligns with blueprint v3.2: global defaults + per-route overrides, full on-chain stable/native math
+ * @dev Aligns with blueprint v3: global defaults + per-route overrides, full on-chain stable/native math
  */
 contract CommissionManager is Ownable {
     using SafeERC20 for IERC20;
