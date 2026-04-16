@@ -48,7 +48,6 @@ contract CommissionManager is Ownable {
 
     // Constants
     uint256 private constant _MAX_STABLE_PERCENT = 9000; // 90%
-    uint256 private constant _HUNDRED_PERCENT = 10000;
 
     // Per-route overrides
     // key = keccak256(abi.encodePacked(sourceChain, destChain, tokenAddress))
@@ -100,7 +99,7 @@ contract CommissionManager is Ownable {
 
     // ============ Constructor ============
 
-    constructor(address _bridgeAddress) {
+    constructor(address _bridgeAddress) Ownable(msg.sender) {
         require(
             _bridgeAddress != address(0),
             "CommissionManager: Invalid bridge address"
@@ -131,7 +130,7 @@ contract CommissionManager is Ownable {
         uint256 tokenDecimals
     )
         external
-        pure
+        view
         returns (
             uint256 tokenCommission,
             uint256 nativeCommission,
@@ -187,7 +186,7 @@ contract CommissionManager is Ownable {
         uint256 tokenDecimals
     )
         external
-        pure
+        view
         returns (
             uint256 tokenCommission,
             uint256 nativeCommission,
@@ -428,7 +427,7 @@ contract CommissionManager is Ownable {
         string calldata sourceChain,
         string calldata destChain,
         address token
-    ) external pure returns (bytes32) {
+    ) public pure returns (bytes32) {
         return keccak256(abi.encodePacked(sourceChain, destChain, token));
     }
 
