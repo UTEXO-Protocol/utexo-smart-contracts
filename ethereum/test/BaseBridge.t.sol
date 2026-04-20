@@ -50,7 +50,7 @@ contract BaseBridgeTest is Test {
     // ========================================================================
 
     function test_constructor_setsTokenAndOwner() public view {
-        assertEq(bridge.token(), address(token));
+        assertEq(bridge.TOKEN(), address(token));
         assertEq(bridge.owner(), owner);
     }
 

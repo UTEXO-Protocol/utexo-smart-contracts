@@ -23,7 +23,7 @@ contract BridgeFundsIn is Script {
         uint256 txId         = vm.envUint('TX_ID');
 
         Bridge bridge = Bridge(bridgeAddr);
-        address token = bridge.token();
+        address token = bridge.TOKEN();
 
         vm.startBroadcast(pk);
         IERC20(token).approve(bridgeAddr, amount);

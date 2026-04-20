@@ -8,6 +8,10 @@ interface IBridge {
 
     error InvalidDestinationAddress();
     error InvalidDestinationChain();
+    error InvalidBtcRelayAddress();
+    error DuplicateTransactionId();
+    error FundsInNotFound(uint256 transactionId);
+    error FundsOutAmountExceedsFundsIn();
 
     // =========================================================================
     // Events
@@ -33,12 +37,16 @@ interface IBridge {
     /// @param transactionId    Backend-assigned transaction identifier.
     /// @param sourceChain      Source chain identifier.
     /// @param sourceAddress    Sender address on the source chain.
+    /// @param blockHeight      Bitcoin block height verified via BtcRelay.
+    /// @param commitmentHash   Bitcoin block commitment hash verified via BtcRelay.
     event BridgeFundsOut(
         address indexed recipient,
         uint256 amount,
         uint256 transactionId,
         string  sourceChain,
-        string  sourceAddress
+        string  sourceAddress,
+        uint256 blockHeight,
+        bytes32 commitmentHash
     );
 
     // =========================================================================
@@ -58,15 +66,19 @@ interface IBridge {
     // External — owner-only (called via MultisigProxy.execute)
     // =========================================================================
 
-    /// @notice Release tokens to a recipient.
+    /// @notice Release tokens to a recipient. Verifies the Bitcoin block header
+    ///         is known to BtcRelay and that the referenced fundsIn operations
+    ///         exist on-chain before releasing.
     ///         Only callable by owner (MultisigProxy via execute()).
     function fundsOut(
-        address token,
         address recipient,
         uint256 amount,
         uint256 transactionId,
         string  calldata sourceChain,
-        string  calldata sourceAddress
+        string  calldata sourceAddress,
+        uint256 blockHeight,
+        bytes32 commitmentHash,
+        uint256[] calldata fundsInIds
     ) external;
 
     /// @notice Permanently blocked — ownership cannot be renounced.

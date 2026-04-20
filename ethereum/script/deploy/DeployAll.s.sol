@@ -9,7 +9,7 @@ import { MultisigProxy } from '../../src/MultisigProxy.sol';
 /// @notice Full production flow: deploy Bridge → deploy MultisigProxy → transfer Bridge ownership.
 ///
 /// Env (same set as individual scripts, minus BRIDGE_ADDRESS):
-///   PRIVATE_KEY, USDT0_ADDRESS, ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD,
+///   PRIVATE_KEY, USDT0_ADDRESS, BTC_RELAY_ADDRESS, ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD,
 ///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD, COMMISSION_RECIPIENT, TIMELOCK_DURATION
 ///
 /// Usage:
@@ -19,6 +19,7 @@ contract DeployAll is Script {
     function run() external returns (Bridge bridge, MultisigProxy proxy) {
         uint256 pk          = vm.envUint('PRIVATE_KEY');
         address usdt0       = vm.envAddress('USDT0_ADDRESS');
+        address btcRelay    = vm.envAddress('BTC_RELAY_ADDRESS');
         address[] memory enc = vm.envAddress('ENCLAVE_SIGNERS', ',');
         uint256 encThr      = vm.envUint('ENCLAVE_THRESHOLD');
         address[] memory fed = vm.envAddress('FEDERATION_SIGNERS', ',');
@@ -28,7 +29,7 @@ contract DeployAll is Script {
 
         vm.startBroadcast(pk);
 
-        bridge = new Bridge(usdt0);
+        bridge = new Bridge(usdt0, btcRelay);
         proxy  = new MultisigProxy(
             address(bridge),
             enc, encThr,

@@ -6,6 +6,7 @@ import { MultisigProxy } from '../src/MultisigProxy.sol';
 import { IMultisigProxy } from '../src/interfaces/IMultisigProxy.sol';
 import { Bridge }    from '../src/Bridge.sol';
 import { MockERC20 } from './helpers/MockERC20.sol';
+import { MockBtcRelay } from './helpers/MockBtcRelay.sol';
 import { MultisigHelper } from './helpers/MultisigHelper.sol';
 
 contract MultisigProxyTest is Test {
@@ -34,6 +35,7 @@ contract MultisigProxyTest is Test {
     MultisigProxy proxy;
     Bridge        bridge;
     MockERC20     token;
+    MockBtcRelay  btcRelay;
 
     // Enclave signers (3-of-N with threshold 2)
     uint256 encPk1 = 0xE1;
@@ -69,7 +71,12 @@ contract MultisigProxyTest is Test {
     uint256 constant TX_ID     = 42;
     uint256 constant NONCE_OP  = 7;
 
-    bytes4  constant FUNDS_OUT_SELECTOR = bytes4(keccak256('fundsOut(address,address,uint256,uint256,string,string)'));
+    // BtcRelay test data
+    uint256 constant BLOCK_HEIGHT    = 850_000;
+    bytes32 constant COMMITMENT_HASH = keccak256('test-btc-block-commitment');
+    uint256 constant BTC_CONFIRMATIONS = 6;
+
+    bytes4  constant FUNDS_OUT_SELECTOR = bytes4(keccak256('fundsOut(address,uint256,uint256,string,string,uint256,bytes32,uint256[])'));
 
     function setUp() public {
         encA1 = vm.addr(encPk1);
@@ -80,9 +87,11 @@ contract MultisigProxyTest is Test {
         fedA3 = vm.addr(fedPk3);
 
         token = new MockERC20('Mock USDT0', 'USDT0');
+        btcRelay = new MockBtcRelay();
+        btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, BTC_CONFIRMATIONS);
 
         vm.prank(deployer);
-        bridge = new Bridge(address(token));
+        bridge = new Bridge(address(token), address(btcRelay));
 
         address[] memory enc = new address[](3);
         enc[0] = encA1; enc[1] = encA2; enc[2] = encA3;
@@ -130,10 +139,15 @@ contract MultisigProxyTest is Test {
         bitmap = 0x3;
     }
 
+    function _fundsInIds() internal pure returns (uint256[] memory ids) {
+        ids = new uint256[](1);
+        ids[0] = TX_ID;
+    }
+
     function _fundsOutCalldata() internal view returns (bytes memory) {
         return abi.encodeWithSelector(
             FUNDS_OUT_SELECTOR,
-            address(token), recipient, AMOUNT, TX_ID, SRC_CHAIN, SRC_ADDR
+            recipient, AMOUNT, TX_ID, SRC_CHAIN, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _fundsInIds()
         );
     }
 
