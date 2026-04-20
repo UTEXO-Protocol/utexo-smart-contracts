@@ -2,136 +2,116 @@
 pragma solidity 0.8.20;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+import {
+    CommissionConfig,
+    CommissionCurrency,
+    CommissionSide,
+    ICommissionManager
+} from "./interfaces/ICommissionManager.sol";
 
 /**
  * @title CommissionManager
- * @notice Non-upgradeable commission calculation, configuration, and fee collection for the EVM bridge
- * @dev Aligns with blueprint v3.2: global defaults + per-route overrides, full on-chain stable/native math
+ * @author UTEXO bridge stack
+ * @notice On-chain commission quotes, owner configuration, and custody of bridge fees (ERC-20 and native).
+ * @dev Blueprint v3-style design: **global defaults** plus optional **per-route overrides** keyed by
+ *      `keccak256(abi.encode(sourceChain, destChain, token))`. Routes are **directional** (swapping
+ *      source and destination yields a different key), so independent rules can apply to each leg of a
+ *      round trip (e.g. ETH→RGB vs RGB→ETH).
+ *
+ *      **Side (`CommissionSide`):** For a given route config, commission applies only to **either**
+ *      `FUNDS_IN` **or** `FUNDS_OUT`, matching `calculateFundsInCommission` vs `calculateFundsOutCommission`.
+ *      **Currency (`CommissionCurrency`):** `TOKEN` deducts fee from the bridged amount; `NATIVE` expresses
+ *      fee in native wei using owner-set **mock** rates and `IERC20Metadata.decimals()` on `token`.
+ *
+ *      **Roles:** `bridgeAddress` may call `receiveTokenCommission` and `receive()` to credit fees;
+ *      `owner` configures rules and withdraws accumulated pools. `renounceOwnership` is disabled.
+ *      Withdrawals use `nonReentrant` against reentrancy via ERC-20 hooks or native recipients.
  */
-contract CommissionManager is Ownable {
+contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
     using SafeERC20 for IERC20;
-
-    // ============ Structs ============
-
-    struct CommissionConfig {
-        uint256 stablePercent; // Percent * 100 (e.g. 400 = 4%)
-        uint256 gasEstimate; // Reserved for future gas-based logic (blueprint field)
-        uint8 multiplier; // Usually 100
-        CommissionSide side; // FUNDS_IN or FUNDS_OUT
-        CommissionCurrency currency; // TOKEN or NATIVE
-        bool isSet; // true = explicit route rule; false = fall back to globals
-    }
-
-    // ============ Enums ============
-    enum CommissionSide {
-        FUNDS_IN,
-        FUNDS_OUT
-    }
-    enum CommissionCurrency {
-        TOKEN,
-        NATIVE
-    }
 
     // ============ State Variables ============
 
-    // Bridge address (only bridge can send commissions)
+    /// @notice Address allowed to credit token and native commission.
     address public bridgeAddress;
 
-    // Global defaults (when route rule is not set)
-    uint256 public globalStablePercent = 400; // 4% default
-    uint256 public globalGasEstimate = 0;
+    /// @notice Default `stablePercent` when no per-route rule exists (×100; 0 = no % fee until configured).
+    uint256 public globalStablePercent = 0;
+    /// @notice Default `multiplier` for `calculateStableFee` (typically 100).
     uint8 public globalMultiplier = 100;
+    /// @notice Default `side` for routes without an override.
     CommissionSide public globalSide = CommissionSide.FUNDS_IN;
+    /// @notice Default `currency` for routes without an override.
     CommissionCurrency public globalCurrency = CommissionCurrency.TOKEN;
 
-    // Constants
-    uint256 private constant _MAX_STABLE_PERCENT = 9000; // 90%
-    uint256 private constant _HUNDRED_PERCENT = 10000;
+    /// @notice Maximum allowed `stablePercent` (9000 = 90%).
+    uint256 private constant _MAX_STABLE_PERCENT = 9000;
 
-    // Per-route overrides
-    // key = keccak256(abi.encodePacked(sourceChain, destChain, tokenAddress))
+    /// @notice Per-route overrides; key = `buildRouteKey(sourceChain, destChain, token)`.
     mapping(bytes32 => CommissionConfig) public commissionRules;
 
-    // Accumulated fees
+    /// @notice Accrued ERC-20 commission per token (tracks balance held for that token).
     mapping(address => uint256) public tokenCommissionPool;
+    /// @notice Accrued native commission in wei.
     uint256 public nativeCommissionPool;
 
-    // ============ Events ============
-
-    event BridgeAddressUpdated(address indexed newBridge);
-
-    event GlobalDefaultsUpdated(
-        uint256 stablePercent,
-        uint8 multiplier,
-        CommissionSide side,
-        CommissionCurrency currency
-    );
-
-    event CommissionRuleUpdated(
-        string sourceChain,
-        string destChain,
-        address indexed token,
-        CommissionConfig config
-    );
-
-    event CommissionRuleCleared(
-        string sourceChain,
-        string destChain,
-        address indexed token
-    );
-
-    event TokenCommissionReceived(address indexed token, uint256 amount);
-    event NativeCommissionReceived(uint256 amount);
-    event TokenCommissionWithdrawn(
-        address indexed token,
-        address indexed to,
-        uint256 amount
-    );
-    event NativeCommissionWithdrawn(address indexed to, uint256 amount);
+    /// @notice Global mock wei-per-token rate for NATIVE conversion if per-token mock is unset.
+    uint256 public mockTokenToNativeRate;
+    /// @notice Per-token mock rate; zero means use `mockTokenToNativeRate`.
+    mapping(address => uint256) public mockTokenToNativeRateForToken;
 
     // ============ Modifiers ============
 
+    /// @dev Restricts call to `bridgeAddress`.
     modifier onlyBridge() {
-        require(msg.sender == bridgeAddress, "CommissionManager: Only bridge");
+        if (msg.sender != bridgeAddress) revert OnlyBridge();
         _;
     }
 
     // ============ Constructor ============
 
-    constructor(address _bridgeAddress) {
-        require(
-            _bridgeAddress != address(0),
-            "CommissionManager: Invalid bridge address"
-        );
+    /**
+     * @notice Deploys the manager; `msg.sender` is owner; `_bridgeAddress` is the initial bridge.
+     * @param _bridgeAddress Bridge that will send commissions (non-zero).
+     */
+    constructor(address _bridgeAddress) Ownable(msg.sender) {
+        if (_bridgeAddress == address(0)) revert InvalidBridgeAddress();
         bridgeAddress = _bridgeAddress;
+    }
+
+    /// @inheritdoc Ownable
+    /// @notice Always reverts. Use `transferOwnership` to change admin.
+    function renounceOwnership() public view override(Ownable) onlyOwner {
+        revert RenounceOwnershipBlocked();
     }
 
     // ============ Core Calculation Functions ============
 
     /**
-     * @notice Calculate commission for fundsIn operation
-     * @param sourceChain Source chain identifier
-     * @param destChain Destination chain identifier
-     * @param token Token address
-     * @param amount Amount being bridged
-     * @param tokenToNativeRate Oracle rate: wei per token unit
-     * @param tokenDecimals Token decimals
-     * @return tokenCommission Commission in token units
-     * @return nativeCommission Commission in native units (wei)
-     * @return netAmount Amount after commission deduction
+     * @notice Quote commission for an inbound (`fundsIn`) transfer on this chain.
+     * @param sourceChain Origin chain id (must match configured route keys).
+     * @param destChain Destination chain id.
+     * @param token ERC-20 token used for the transfer.
+     * @param amount Gross amount bridged (same units as token).
+     * @return tokenCommission Fee in token smallest units (0 if not `TOKEN` currency).
+     * @return nativeCommission Fee in wei (0 if not `NATIVE` currency).
+     * @return netAmount Amount after fee if `TOKEN`; full `amount` if `NATIVE` (fee paid separately in native).
+     * @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_IN`. NATIVE path uses
+     *      `resolvedMockTokenToNativeRate` and `IERC20Metadata(token).decimals()`.
      */
     function calculateFundsInCommission(
         string calldata sourceChain,
         string calldata destChain,
         address token,
-        uint256 amount,
-        uint256 tokenToNativeRate,
-        uint256 tokenDecimals
+        uint256 amount
     )
         external
-        pure
+        view
         returns (
             uint256 tokenCommission,
             uint256 nativeCommission,
@@ -157,37 +137,40 @@ contract CommissionManager is Ownable {
         } else {
             // NATIVE commission: user pays in ETH/BNB via msg.value
             tokenCommission = 0;
-            nativeCommission = convertTokenToNative(
-                stableFee,
-                tokenToNativeRate,
-                tokenDecimals
-            );
+            if (stableFee == 0) {
+                nativeCommission = 0;
+            } else {
+                uint256 rate = resolvedMockTokenToNativeRate(token);
+                if (rate == 0) revert MockTokenToNativeRateNotSet();
+                nativeCommission = convertTokenToNative(
+                    stableFee,
+                    rate,
+                    _tokenDecimals(token)
+                );
+            }
             netAmount = amount; // Full amount bridges
         }
     }
 
     /**
-     * @notice Calculate commission for fundsOut operation
-     * @param sourceChain Source chain identifier
-     * @param destChain Destination chain identifier
-     * @param token Token address
-     * @param amount Amount to be released
-     * @param tokenToNativeRate Oracle rate: wei per token unit (for native commission)
-     * @param tokenDecimals Token decimals
-     * @return tokenCommission Commission in token units
-     * @return nativeCommission Commission in native units (wei)
-     * @return netAmount Amount user receives after commission
+     * @notice Quote commission for an outbound (`fundsOut`) release on this chain.
+     * @param sourceChain Origin chain id (must match configured route keys).
+     * @param destChain Destination chain id.
+     * @param token ERC-20 token being released.
+     * @param amount Gross amount to release before fee.
+     * @return tokenCommission Fee in token units (0 if not `TOKEN` currency).
+     * @return nativeCommission Fee in wei (0 if not `NATIVE`).
+     * @return netAmount User receives `amount - tokenCommission` for `TOKEN`; `amount` for `NATIVE` (fee separate).
+     * @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_OUT`. See `calculateFundsInCommission` for rates/decimals.
      */
     function calculateFundsOutCommission(
         string calldata sourceChain,
         string calldata destChain,
         address token,
-        uint256 amount,
-        uint256 tokenToNativeRate,
-        uint256 tokenDecimals
+        uint256 amount
     )
         external
-        pure
+        view
         returns (
             uint256 tokenCommission,
             uint256 nativeCommission,
@@ -212,21 +195,27 @@ contract CommissionManager is Ownable {
         } else {
             // NATIVE commission for fundsOut: user pays in native (per blueprint)
             tokenCommission = 0;
-            nativeCommission = convertTokenToNative(
-                stableFee,
-                tokenToNativeRate,
-                tokenDecimals
-            );
+            if (stableFee == 0) {
+                nativeCommission = 0;
+            } else {
+                uint256 rate = resolvedMockTokenToNativeRate(token);
+                if (rate == 0) revert MockTokenToNativeRateNotSet();
+                nativeCommission = convertTokenToNative(
+                    stableFee,
+                    rate,
+                    _tokenDecimals(token)
+                );
+            }
             netAmount = amount;
         }
     }
 
     /**
-     * @notice Calculate stable commission fee
-     * @param amount Token amount
-     * @param stablePercent Percent * 100 (e.g., 400 = 4%)
-     * @param multiplier Usually 100
-     * @return Fee in token units
+     * @notice Stable fee: `(amount * stablePercent) / multiplier / multiplier`.
+     * @param amount Token amount in smallest units.
+     * @param stablePercent Percent × 100 (e.g. 400 = 4%).
+     * @param multiplier Typically 100.
+     * @return Fee in token smallest units.
      */
     function calculateStableFee(
         uint256 amount,
@@ -237,28 +226,53 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Convert token-denominated fee to native (wei) using oracle rate (blueprint: convertTokenToNative)
-     * @param tokenFee Fee amount in token smallest units
-     * @param tokenToNativeRate Wei per 1 token unit (smallest units), from oracle/signature
-     * @param tokenDecimals Token decimals (e.g. 6 for USDT)
-     * @return nativeFee Native amount in wei
+     * @notice Convert a token-denominated fee to native wei (blueprint `convertTokenToNative`).
+     * @param tokenFee Fee in token smallest units.
+     * @param rateWeiPerTokenUnit Mock rate: wei per 10**`tokenDecimals` token units.
+     * @param tokenDecimals Token decimals (e.g. 18).
+     * @return nativeFee Equivalent native amount in wei.
      */
     function convertTokenToNative(
         uint256 tokenFee,
-        uint256 tokenToNativeRate,
+        uint256 rateWeiPerTokenUnit,
         uint256 tokenDecimals
     ) public pure returns (uint256 nativeFee) {
-        nativeFee = (tokenFee * tokenToNativeRate) / (10 ** tokenDecimals);
+        nativeFee = (tokenFee * rateWeiPerTokenUnit) / (10 ** tokenDecimals);
+    }
+
+    /**
+     * @notice Effective mock wei-per-token rate: per-token if non-zero, else global.
+     * @param token ERC-20 token (used with decimals in commission math).
+     * @return rate Wei-per-token-unit rate for `convertTokenToNative`.
+     */
+    function resolvedMockTokenToNativeRate(address token) public view returns (uint256) {
+        uint256 r = mockTokenToNativeRateForToken[token];
+        if (r != 0) return r;
+        return mockTokenToNativeRate;
+    }
+
+    /**
+     * @notice ERC-20 `decimals()` as `uint256` for exponent math.
+     * @param token Token to query.
+     * @return Token decimals (typically 6–18).
+     * @dev Reverts `TokenDecimalsUnavailable` if the call fails (non-standard token).
+     */
+    function _tokenDecimals(address token) internal view returns (uint256) {
+        try IERC20Metadata(token).decimals() returns (uint8 d) {
+            return uint256(d);
+        } catch {
+            revert TokenDecimalsUnavailable();
+        }
     }
 
     // ============ Configuration Functions ============
 
     /**
-     * @notice Set global default commission parameters
-     * @param stablePercent Default stable percent (e.g., 400 = 4%)
-     * @param multiplier Default multiplier (usually 100)
-     * @param side Default commission side (FUNDS_IN or FUNDS_OUT)
-     * @param currency Default commission currency (TOKEN or NATIVE)
+     * @notice Sets defaults used when no per-route rule exists for a key.
+     * @param stablePercent Percent × 100 (0 = no stable % fee); must be ≤ 9000.
+     * @param multiplier Default multiplier (typically 100).
+     * @param side Default `FUNDS_IN` vs `FUNDS_OUT`.
+     * @param currency Default `TOKEN` vs `NATIVE`.
      */
     function setGlobalDefaults(
         uint256 stablePercent,
@@ -266,18 +280,8 @@ contract CommissionManager is Ownable {
         CommissionSide side,
         CommissionCurrency currency
     ) external onlyOwner {
-        require(
-            stablePercent <= _MAX_STABLE_PERCENT,
-            "CommissionManager: Percent too high"
-        );
-        require(
-            multiplier > 0,
-            "CommissionManager: Multiplier must be nonzero"
-        );
-        require(
-            stablePercent > 0,
-            "CommissionManager: Percent must be nonzero"
-        );
+        if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
+        if (multiplier == 0) revert MultiplierZero();
 
         globalStablePercent = stablePercent;
         globalMultiplier = multiplier;
@@ -288,11 +292,31 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Set commission rule for a specific route
-     * @param sourceChain Source chain identifier
-     * @param destChain Destination chain identifier
-     * @param token Token address
-     * @param config Commission configuration
+     * @notice Sets `mockTokenToNativeRate` (fallback when per-token mock is zero).
+     * @param rate Wei-per-token-unit rate for `convertTokenToNative`.
+     */
+    function setMockTokenToNativeRate(uint256 rate) external onlyOwner {
+        mockTokenToNativeRate = rate;
+        emit MockTokenToNativeRateUpdated(rate);
+    }
+
+    /**
+     * @notice Sets or clears per-token mock rate for NATIVE commission quotes.
+     * @param token ERC-20 token (non-zero).
+     * @param rate Mock rate; 0 clears override so global `mockTokenToNativeRate` applies.
+     */
+    function setMockTokenToNativeRateForToken(address token, uint256 rate) external onlyOwner {
+        if (token == address(0)) revert InvalidToken();
+        mockTokenToNativeRateForToken[token] = rate;
+        emit MockTokenToNativeRateForTokenUpdated(token, rate);
+    }
+
+    /**
+     * @notice Writes or replaces the override for `buildRouteKey(sourceChain, destChain, token)`.
+     * @param sourceChain Route source id (directional; paired with `destChain`).
+     * @param destChain Route destination id.
+     * @param token ERC-20 token (non-zero).
+     * @param config Rule parameters; `isSet` is forced true on store.
      */
     function setCommissionRule(
         string calldata sourceChain,
@@ -300,19 +324,10 @@ contract CommissionManager is Ownable {
         address token,
         CommissionConfig calldata config
     ) external onlyOwner {
+        if (token == address(0)) revert InvalidToken();
         // Validate config
-        require(
-            config.stablePercent <= _MAX_STABLE_PERCENT,
-            "CommissionManager: Percent too high"
-        );
-        require(
-            config.stablePercent > 0,
-            "CommissionManager: Percent must be nonzero"
-        );
-        require(
-            config.multiplier > 0,
-            "CommissionManager: Multiplier must be nonzero"
-        );
+        if (config.stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
+        if (config.multiplier == 0) revert MultiplierZero();
 
         // Build route key
         bytes32 key = buildRouteKey(sourceChain, destChain, token);
@@ -324,30 +339,28 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Clear route-specific config (revert to global defaults)
-     * @param sourceChain Source chain identifier
-     * @param destChain Destination chain identifier
-     * @param token Token address
+     * @notice Deletes the override for this route key; `getEffectiveConfig` will use globals.
+     * @param sourceChain Route source id.
+     * @param destChain Route destination id.
+     * @param token ERC-20 token (non-zero).
      */
     function clearCommissionRule(
         string calldata sourceChain,
         string calldata destChain,
         address token
     ) external onlyOwner {
+        if (token == address(0)) revert InvalidToken();
         bytes32 key = buildRouteKey(sourceChain, destChain, token);
         delete commissionRules[key];
         emit CommissionRuleCleared(sourceChain, destChain, token);
     }
 
     /**
-     * @notice Update bridge address
-     * @param newBridge New bridge contract address
+     * @notice Updates `bridgeAddress` (only that address may credit commissions).
+     * @param newBridge Non-zero bridge contract.
      */
     function setBridgeAddress(address newBridge) external onlyOwner {
-        require(
-            newBridge != address(0),
-            "CommissionManager: Invalid bridge address"
-        );
+        if (newBridge == address(0)) revert InvalidBridgeAddress();
         bridgeAddress = newBridge;
         emit BridgeAddressUpdated(newBridge);
     }
@@ -355,9 +368,9 @@ contract CommissionManager is Ownable {
     // ============ View Functions ============
 
     /**
-     * @notice Get effective configuration for a route (with fallback to globals)
-     * @param ruleKey Route key (keccak256 of sourceChain, destChain, token)
-     * @return Effective commission configuration
+     * @notice Resolves stored rule or materializes global defaults with `isSet: true`.
+     * @param ruleKey `buildRouteKey` output.
+     * @return config Effective parameters for calculators.
      */
     function getEffectiveConfig(
         bytes32 ruleKey
@@ -372,7 +385,6 @@ contract CommissionManager is Ownable {
         return
             CommissionConfig({
                 stablePercent: globalStablePercent,
-                gasEstimate: globalGasEstimate,
                 multiplier: globalMultiplier,
                 side: globalSide,
                 currency: globalCurrency,
@@ -381,11 +393,11 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Get global default configuration
-     * @return stablePercent Global stable percent
-     * @return multiplier Global multiplier
-     * @return side Global commission side
-     * @return currency Global commission currency
+     * @notice Returns current global defaults (used when no per-route override exists).
+     * @return stablePercent Global percent × 100.
+     * @return multiplier Global multiplier.
+     * @return side Global `CommissionSide`.
+     * @return currency Global `CommissionCurrency`.
      */
     function getGlobalDefaults()
         external
@@ -406,11 +418,11 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Get commission rule for a specific route
-     * @param sourceChain Source chain identifier
-     * @param destChain Destination chain identifier
-     * @param token Token address
-     * @return Commission configuration for the route
+     * @notice Raw storage read for a route (may be unset; check `config.isSet`).
+     * @param sourceChain Route source id.
+     * @param destChain Route destination id.
+     * @param token ERC-20 token.
+     * @return config Stored override or empty struct if never set.
      */
     function getCommissionRule(
         string calldata sourceChain,
@@ -422,38 +434,45 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice keccak256(abi.encodePacked(sourceChain, destChain, token))
+     * @notice Deterministic route id for commission rules.
+     * @param sourceChain Route source id.
+     * @param destChain Route destination id.
+     * @param token ERC-20 token address.
+     * @return key `keccak256(abi.encode(sourceChain, destChain, token))`.
+     * @dev Uses `abi.encode` (not `encodePacked`) to avoid ambiguous hashing over dynamic strings.
      */
     function buildRouteKey(
         string calldata sourceChain,
         string calldata destChain,
         address token
-    ) external pure returns (bytes32) {
-        return keccak256(abi.encodePacked(sourceChain, destChain, token));
+    ) public pure returns (bytes32) {
+        return keccak256(abi.encode(sourceChain, destChain, token));
     }
 
     // ============ Commission Collection Functions ============
 
     /**
-     * @notice Receive token commission from bridge
-     * @param token Token address
-     * @param amount Commission amount
+     * @notice Credits token commission: increases `tokenCommissionPool[token]` by the actual balance delta.
+     * @param token ERC-20 token (non-zero). Bridge must transfer tokens before this call.
+     * @dev Pool tracks on-chain balance; no calldata amount (supports fee-on-transfer tokens).
      */
-    function receiveTokenCommission(
-        address token,
-        uint256 amount
-    ) external onlyBridge {
-        require (amount > 0, "CommissionManager: Amount must be positive");
-        tokenCommissionPool[token] += amount;
-        emit TokenCommissionReceived(token, amount);
+    function receiveTokenCommission(address token) external onlyBridge {
+        if (token == address(0)) revert InvalidToken();
+        uint256 newBalance = IERC20(token).balanceOf(address(this));
+        uint256 priorPool = tokenCommissionPool[token];
+        if (newBalance < priorPool) revert BalanceBelowRecordedPool();
+        uint256 recorded = newBalance - priorPool;
+        if (recorded == 0) revert NothingReceived();
+        tokenCommissionPool[token] = newBalance;
+        emit TokenCommissionReceived(token, recorded);
     }
 
     /**
-     * @notice Receive native commission from bridge
-     * @dev Called via payable function or direct transfer
+     * @notice Accepts native commission from the bridge; increases `nativeCommissionPool`.
+     * @dev Callable only by `bridgeAddress`; `msg.value` must be non-zero.
      */
     receive() external payable onlyBridge {
-        require(msg.value > 0, "CommissionManager: Amount must be positive");
+        if (msg.value == 0) revert ZeroNativeAmount();
         nativeCommissionPool += msg.value;
         emit NativeCommissionReceived(msg.value);
     }
@@ -461,21 +480,20 @@ contract CommissionManager is Ownable {
     // ============ Withdrawal Functions ============
 
     /**
-     * @notice Withdraw token commission
-     * @param token Token address
-     * @param to Recipient address
-     * @param amount Amount to withdraw
+     * @notice Owner withdraws `amount` of accrued `token` commission to `to`.
+     * @param token ERC-20 token (non-zero).
+     * @param to Recipient (non-zero).
+     * @param amount Amount to send (≤ pool).
+     * @dev `nonReentrant`; updates pool before `safeTransfer`.
      */
     function withdrawTokenCommission(
         address token,
         address to,
         uint256 amount
-    ) external onlyOwner {
-        require(to != address(0), "CommissionManager: Invalid recipient");
-        require(
-            tokenCommissionPool[token] >= amount,
-            "CommissionManager: Insufficient balance"
-        );
+    ) external onlyOwner nonReentrant {
+        if (token == address(0)) revert InvalidToken();
+        if (to == address(0)) revert InvalidRecipient();
+        if (tokenCommissionPool[token] < amount) revert InsufficientBalance();
 
         tokenCommissionPool[token] -= amount;
         IERC20(token).safeTransfer(to, amount);
@@ -484,33 +502,36 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Withdraw native commission
-     * @param to Recipient address
-     * @param amount Amount to withdraw
+     * @notice Owner withdraws `amount` wei of native commission.
+     * @param to Recipient (non-zero).
+     * @param amount Wei to send (≤ pool).
+     * @dev `nonReentrant`; updates pool before native transfer.
      */
     function withdrawNativeCommission(
         address payable to,
         uint256 amount
-    ) external onlyOwner {
-        require(to != address(0), "CommissionManager: Invalid recipient");
-        require(
-            nativeCommissionPool >= amount,
-            "CommissionManager: Insufficient balance"
-        );
+    ) external onlyOwner nonReentrant {
+        if (to == address(0)) revert InvalidRecipient();
+        if (nativeCommissionPool < amount) revert InsufficientBalance();
 
         nativeCommissionPool -= amount;
         (bool success, ) = to.call{value: amount}("");
-        require(success, "CommissionManager: Native transfer failed");
+        if (!success) revert NativeTransferFailed();
 
         emit NativeCommissionWithdrawn(to, amount);
     }
 
     /**
-     * @notice Withdraw entire token commission balance for one token
+     * @notice Owner withdraws the full accrued balance for `token` to `to`.
+     * @param token ERC-20 token (non-zero).
+     * @param to Recipient (non-zero).
+     * @dev `nonReentrant`. Reverts `NoBalance` if pool is zero.
      */
-    function withdrawAllTokenCommission(address token, address to) external onlyOwner {
+    function withdrawAllTokenCommission(address token, address to) external onlyOwner nonReentrant {
+        if (token == address(0)) revert InvalidToken();
+        if (to == address(0)) revert InvalidRecipient();
         uint256 balance = tokenCommissionPool[token];
-        require(balance > 0, "CommissionManager: No balance");
+        if (balance == 0) revert NoBalance();
 
         tokenCommissionPool[token] = 0;
         IERC20(token).safeTransfer(to, balance);
@@ -519,15 +540,18 @@ contract CommissionManager is Ownable {
     }
 
     /**
-     * @notice Withdraw entire native commission balance
+     * @notice Owner withdraws the full `nativeCommissionPool` to `to`.
+     * @param to Recipient (non-zero).
+     * @dev `nonReentrant`. Reverts `NoBalance` if pool is zero.
      */
-    function withdrawAllNativeCommission(address payable to) external onlyOwner {
+    function withdrawAllNativeCommission(address payable to) external onlyOwner nonReentrant {
+        if (to == address(0)) revert InvalidRecipient();
         uint256 balance = nativeCommissionPool;
-        require(balance > 0, "CommissionManager: No balance");
+        if (balance == 0) revert NoBalance();
 
         nativeCommissionPool = 0;
         (bool success, ) = to.call{value: balance}("");
-        require(success, "CommissionManager: Native transfer failed");
+        if (!success) revert NativeTransferFailed();
 
         emit NativeCommissionWithdrawn(to, balance);
     }
