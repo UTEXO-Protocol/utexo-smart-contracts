@@ -5,7 +5,7 @@ Smart contracts for the Utexo cross-chain bridge. Each supported network has its
 ## Repository structure
 
 ```
-ethereum/   — EVM contracts (Solidity, Hardhat)
+ethereum/   — EVM contracts (Solidity, Foundry)
 tron/       — Tron contracts
 ```
 
@@ -36,7 +36,7 @@ Private keys are held inside Nitro Enclaves and cannot be extracted. Key persist
 
 ### Commission
 
-Each transfer deducts a service commission on the source side and a blockchain fee on the destination side. Commission accumulates in per-token pools on the bridge contract. Withdrawal is controlled by federation governance through the timelock.
+Each transfer deducts a service commission, which can be charged on either the source side (`FundsIn`) or the destination side (`FundsOut`), in the bridged token or the native currency of the chain, per-route. On EVM the commission is held by a dedicated `CommissionManager` contract — kept separate from bridge liquidity — and withdrawal is controlled by federation governance through the timelock.
 
 ### Replay protection
 

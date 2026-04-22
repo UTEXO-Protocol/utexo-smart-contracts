@@ -8,10 +8,7 @@ import { ReentrancyGuard }   from '@openzeppelin/contracts/utils/ReentrancyGuard
 import { BridgeBase }         from './BridgeBase.sol';
 import { IBridge }            from './interfaces/IBridge.sol';
 import { IBtcRelayView }      from './interfaces/IBtcRelayView.sol';
-import {
-    ICommissionManager,
-    CommissionCurrency
-} from './interfaces/ICommissionManager.sol';
+import { ICommissionManager } from './interfaces/ICommissionManager.sol';
 
 /// @title Bridge
 /// @notice Production bridge for locking USDT0 on Arbitrum and unlocking it back.

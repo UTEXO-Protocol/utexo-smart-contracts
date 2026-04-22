@@ -14,9 +14,10 @@ import { MultisigHelper } from '../../test/helpers/MultisigHelper.sol';
 ///   PRIVATE_KEY             — tx submitter (anyone)
 ///   PROXY_ADDRESS           — MultisigProxy address
 ///   RECIPIENT               — destination address
-///   AMOUNT (wei)            — amount to release
+///   AMOUNT (wei)            — gross amount to release (before commission)
 ///   TX_ID                   — transaction id
 ///   SOURCE_CHAIN            — source chain string
+///   DEST_CHAIN              — destination chain string (used for commission routing)
 ///   SOURCE_ADDRESS          — source address string
 ///   BLOCK_HEIGHT            — Bitcoin block height (verified by BtcRelay)
 ///   COMMITMENT_HASH         — Bitcoin block commitment hash (verified by BtcRelay)
@@ -25,13 +26,17 @@ import { MultisigHelper } from '../../test/helpers/MultisigHelper.sol';
 ///   ENCLAVE_BITMAP          — bitmap of participating signers (hex or decimal)
 ///   DEADLINE_OFFSET         — seconds from now (e.g. 3600)
 contract MultisigExecuteFundsOut is Script {
-    bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256('fundsOut(address,uint256,uint256,string,string,uint256,bytes32,uint256[])'));
+    // New 9-arg fundsOut signature (adds destChain).
+    bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
+        'fundsOut(address,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+    ));
 
     struct Params {
         address recipient;
         uint256 amount;
         uint256 txId;
         string  srcChain;
+        string  dstChain;
         string  srcAddr;
         uint256 blockHeight;
         bytes32 commitmentHash;
@@ -43,6 +48,7 @@ contract MultisigExecuteFundsOut is Script {
         p.amount         = vm.envUint('AMOUNT');
         p.txId           = vm.envUint('TX_ID');
         p.srcChain       = vm.envString('SOURCE_CHAIN');
+        p.dstChain       = vm.envString('DEST_CHAIN');
         p.srcAddr        = vm.envString('SOURCE_ADDRESS');
         p.blockHeight    = vm.envUint('BLOCK_HEIGHT');
         p.commitmentHash = vm.envBytes32('COMMITMENT_HASH');
@@ -51,8 +57,10 @@ contract MultisigExecuteFundsOut is Script {
 
     function _buildCallData(Params memory p) internal pure returns (bytes memory) {
         return abi.encodeWithSelector(
-            FUNDS_OUT_SELECTOR, p.recipient, p.amount, p.txId,
-            p.srcChain, p.srcAddr, p.blockHeight, p.commitmentHash, p.fundsInIds
+            FUNDS_OUT_SELECTOR,
+            p.recipient, p.amount, p.txId,
+            p.srcChain, p.dstChain, p.srcAddr,
+            p.blockHeight, p.commitmentHash, p.fundsInIds
         );
     }
 

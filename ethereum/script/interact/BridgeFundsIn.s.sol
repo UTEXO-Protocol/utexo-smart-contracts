@@ -4,10 +4,11 @@ pragma solidity 0.8.20;
 import { Script, console2 } from 'forge-std/Script.sol';
 import { IERC20 } from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import { Bridge } from '../../src/Bridge.sol';
+import { ICommissionManager } from '../../src/interfaces/ICommissionManager.sol';
 
 /// @title BridgeFundsIn
-/// @notice Approves and calls Bridge.fundsIn() as the current signer. Useful for
-///         manual testing against a deployed Bridge.
+/// @notice Approves and calls Bridge.fundsIn() as the current signer. Quotes the
+///         native commission from CommissionManager and attaches it as msg.value.
 ///
 /// Env:
 ///   PRIVATE_KEY, BRIDGE_ADDRESS, AMOUNT (wei),
@@ -25,9 +26,16 @@ contract BridgeFundsIn is Script {
         Bridge bridge = Bridge(bridgeAddr);
         address token = bridge.TOKEN();
 
+        ICommissionManager cm = bridge.commissionManager();
+        (, uint256 nativeCommission, ) = cm.calculateFundsInCommission(
+            bridge.sourceChainName(), dChain, token, amount
+        );
+
+        console2.log('Native commission (wei):', nativeCommission);
+
         vm.startBroadcast(pk);
         IERC20(token).approve(bridgeAddr, amount);
-        bridge.fundsIn(amount, dChain, dAddr, opNonce, txId);
+        bridge.fundsIn{ value: nativeCommission }(amount, dChain, dAddr, opNonce, txId);
         vm.stopBroadcast();
 
         console2.log('fundsIn succeeded. Bridge balance:', IERC20(token).balanceOf(bridgeAddr));

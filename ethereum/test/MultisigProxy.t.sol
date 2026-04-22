@@ -5,6 +5,13 @@ import { Test } from 'forge-std/Test.sol';
 import { MultisigProxy } from '../src/MultisigProxy.sol';
 import { IMultisigProxy } from '../src/interfaces/IMultisigProxy.sol';
 import { Bridge }    from '../src/Bridge.sol';
+import { CommissionManager } from '../src/CommissionManager.sol';
+import {
+    CommissionConfig,
+    CommissionSide,
+    CommissionCurrency,
+    ICommissionManager
+} from '../src/interfaces/ICommissionManager.sol';
 import { MockERC20 } from './helpers/MockERC20.sol';
 import { MockBtcRelay } from './helpers/MockBtcRelay.sol';
 import { MultisigHelper } from './helpers/MultisigHelper.sol';
@@ -29,13 +36,16 @@ contract MultisigProxyTest is Test {
     event EnclaveSignersUpdated(address[] newSigners, uint256 newThreshold);
     event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
+    event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
     event TeeAllowedSelectorUpdated(bytes4 indexed selector, bool allowed);
     event TimelockDurationUpdated(uint256 newDuration);
+    event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
 
-    MultisigProxy proxy;
-    Bridge        bridge;
-    MockERC20     token;
-    MockBtcRelay  btcRelay;
+    MultisigProxy     proxy;
+    Bridge            bridge;
+    CommissionManager cm;
+    MockERC20         token;
+    MockBtcRelay      btcRelay;
 
     // Enclave signers (3-of-N with threshold 2)
     uint256 encPk1 = 0xE1;
@@ -63,10 +73,12 @@ contract MultisigProxyTest is Test {
     bytes32 domainSep;
 
     // Canonical constants for Bridge calls
-    string  constant DST_CHAIN = 'rgb';
-    string  constant DST_ADDR  = 'rgb:asset/utxo1abc';
-    string  constant SRC_CHAIN = 'rgb';
-    string  constant SRC_ADDR  = 'rgb:sender/utxo1src';
+    string  constant SOURCE_CHAIN = 'arbitrum';
+    string  constant DST_CHAIN    = 'rgb';
+    string  constant DST_ADDR     = 'rgb:asset/utxo1abc';
+    string  constant SRC_CHAIN    = 'rgb';
+    string  constant DST_CHAIN_OUT = 'arbitrum';
+    string  constant SRC_ADDR     = 'rgb:sender/utxo1src';
     uint256 constant AMOUNT    = 100e18;
     uint256 constant TX_ID     = 42;
     uint256 constant NONCE_OP  = 7;
@@ -76,7 +88,9 @@ contract MultisigProxyTest is Test {
     bytes32 constant COMMITMENT_HASH = keccak256('test-btc-block-commitment');
     uint256 constant BTC_CONFIRMATIONS = 6;
 
-    bytes4  constant FUNDS_OUT_SELECTOR = bytes4(keccak256('fundsOut(address,uint256,uint256,string,string,uint256,bytes32,uint256[])'));
+    bytes4  constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
+        'fundsOut(address,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+    ));
 
     function setUp() public {
         encA1 = vm.addr(encPk1);
@@ -90,8 +104,15 @@ contract MultisigProxyTest is Test {
         btcRelay = new MockBtcRelay();
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, BTC_CONFIRMATIONS);
 
+        // Deploy CommissionManager with deployer as temp bridge.
         vm.prank(deployer);
-        bridge = new Bridge(address(token), address(btcRelay));
+        cm = new CommissionManager(deployer);
+
+        vm.prank(deployer);
+        bridge = new Bridge(address(token), address(btcRelay), payable(address(cm)), SOURCE_CHAIN);
+
+        vm.prank(deployer);
+        cm.setBridgeAddress(address(bridge));
 
         address[] memory enc = new address[](3);
         enc[0] = encA1; enc[1] = encA2; enc[2] = encA3;
@@ -101,15 +122,18 @@ contract MultisigProxyTest is Test {
 
         proxy = new MultisigProxy(
             address(bridge),
+            address(cm),
             enc, 2,
             fed, 2,
             commissionReceiver,
             TIMELOCK
         );
 
-        // Transfer Bridge ownership to proxy (production flow)
+        // Transfer ownership of Bridge and CM to proxy (production flow)
         vm.prank(deployer);
         bridge.transferOwnership(address(proxy));
+        vm.prank(deployer);
+        cm.transferOwnership(address(proxy));
 
         domainSep = proxy.DOMAIN_SEPARATOR();
 
@@ -127,15 +151,15 @@ contract MultisigProxyTest is Test {
 
     function _encSigSet2of3() internal pure returns (uint256[] memory pks, uint256 bitmap) {
         pks = new uint256[](2);
-        pks[0] = 0xE1;  // index 0
-        pks[1] = 0xE2;  // index 1
-        bitmap = 0x3;   // bits 0 and 1
+        pks[0] = 0xE1;
+        pks[1] = 0xE2;
+        bitmap = 0x3;
     }
 
     function _fedSigSet2of3() internal pure returns (uint256[] memory pks, uint256 bitmap) {
         pks = new uint256[](2);
-        pks[0] = 0xF1;  // index 0
-        pks[1] = 0xF2;  // index 1
+        pks[0] = 0xF1;
+        pks[1] = 0xF2;
         bitmap = 0x3;
     }
 
@@ -147,7 +171,7 @@ contract MultisigProxyTest is Test {
     function _fundsOutCalldata() internal view returns (bytes memory) {
         return abi.encodeWithSelector(
             FUNDS_OUT_SELECTOR,
-            recipient, AMOUNT, TX_ID, SRC_CHAIN, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _fundsInIds()
+            recipient, AMOUNT, TX_ID, SRC_CHAIN, DST_CHAIN_OUT, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _fundsInIds()
         );
     }
 
@@ -157,6 +181,7 @@ contract MultisigProxyTest is Test {
 
     function test_constructor_setsState() public view {
         assertEq(proxy.bridge(), address(bridge));
+        assertEq(proxy.commissionManager(), address(cm));
         assertEq(proxy.enclaveThreshold(), 2);
         assertEq(proxy.federationThreshold(), 2);
         assertEq(proxy.commissionRecipient(), commissionReceiver);
@@ -176,49 +201,56 @@ contract MultisigProxyTest is Test {
         address[] memory enc = new address[](1); enc[0] = encA1;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.ZeroBridge.selector);
-        new MultisigProxy(address(0), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(0), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
+    }
+
+    function test_constructor_revertsOnZeroCommissionManager() public {
+        address[] memory enc = new address[](1); enc[0] = encA1;
+        address[] memory fed = new address[](1); fed[0] = fedA1;
+        vm.expectRevert(IMultisigProxy.ZeroCommissionManager.selector);
+        new MultisigProxy(address(bridge), address(0), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
     }
 
     function test_constructor_revertsOnNoEnclaveSigners() public {
         address[] memory enc = new address[](0);
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.NoSigners.selector);
-        new MultisigProxy(address(bridge), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
     }
 
     function test_constructor_revertsOnBadEnclaveThreshold() public {
         address[] memory enc = new address[](2); enc[0] = encA1; enc[1] = encA2;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
-        new MultisigProxy(address(bridge), enc, 3, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 3, fed, 1, commissionReceiver, TIMELOCK);
     }
 
     function test_constructor_revertsOnZeroCommission() public {
         address[] memory enc = new address[](1); enc[0] = encA1;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.ZeroCommissionRecipient.selector);
-        new MultisigProxy(address(bridge), enc, 1, fed, 1, address(0), TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, address(0), TIMELOCK);
     }
 
     function test_constructor_revertsOnTimelockTooLong() public {
         address[] memory enc = new address[](1); enc[0] = encA1;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.TimelockTooLong.selector);
-        new MultisigProxy(address(bridge), enc, 1, fed, 1, commissionReceiver, 30 days);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, 30 days);
     }
 
     function test_constructor_revertsOnDuplicateSigner() public {
         address[] memory enc = new address[](2); enc[0] = encA1; enc[1] = encA1;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.DuplicateSigner.selector);
-        new MultisigProxy(address(bridge), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
     }
 
     function test_constructor_revertsOnZeroAddressSigner() public {
         address[] memory enc = new address[](1); enc[0] = address(0);
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.ZeroAddressSigner.selector);
-        new MultisigProxy(address(bridge), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
     }
 
     // ========================================================================
@@ -307,7 +339,6 @@ contract MultisigProxyTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
 
         bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
-        // bitmap says bit 0 + bit 1 set, but the second signature comes from wrong signer
         uint256[] memory pks = new uint256[](2);
         pks[0] = encPk1;
         pks[1] = 0xBADBAD;
@@ -327,7 +358,6 @@ contract MultisigProxyTest is Test {
         pks[0] = encPk1; pks[1] = encPk2; pks[2] = encPk3;
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        // bitmap has 2 bits set (meets threshold) but 3 sigs supplied
         vm.expectRevert(IMultisigProxy.SigCountMismatch.selector);
         proxy.execute(callData, nonce, deadline, 0x3, sigs);
     }
@@ -341,7 +371,6 @@ contract MultisigProxyTest is Test {
         (uint256[] memory pks,) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        // bit 8 > signers.length(3)
         vm.expectRevert(IMultisigProxy.BitmapOutOfRange.selector);
         proxy.execute(callData, nonce, deadline, 0x100, sigs);
     }
@@ -392,7 +421,6 @@ contract MultisigProxyTest is Test {
     }
 
     function test_emergencyUnpause_works() public {
-        // pause first
         test_emergencyPause_works();
 
         uint256 nonce = proxy.proposalNonce();
@@ -410,7 +438,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Propose + Execute — UpdateBridge (represents the full lifecycle)
+    // Propose + Execute — UpdateBridge
     // ========================================================================
 
     function test_proposeUpdateBridge_andExecuteAfterTimelock() public {
@@ -424,7 +452,6 @@ contract MultisigProxyTest is Test {
 
         bytes32 proposalId = proxy.proposeUpdateBridge(newBridge, nonce, deadline, bitmap, sigs);
 
-        // timelock active
         vm.expectRevert(IMultisigProxy.TimelockActive.selector);
         proxy.executeProposal(proposalId, abi.encode(newBridge));
 
@@ -540,11 +567,10 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Propose + Execute — AdminExecute (bypass TEE allowlist; call bridge directly)
+    // Propose + Execute — AdminExecute
     // ========================================================================
 
     function test_proposeAdminExecute_canCallBridge() public {
-        // Use Bridge.pause() — not on TEE allowlist but callable via admin
         bytes memory callData = abi.encodeWithSignature('pause()');
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
@@ -564,6 +590,82 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
+    // Propose + Execute — UpdateCommissionManager
+    // ========================================================================
+
+    function test_proposeUpdateCommissionManager_execute() public {
+        address newCm = makeAddr('newCm');
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(domainSep, newCm, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeUpdateCommissionManager(newCm, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        vm.expectEmit(true, true, false, false);
+        emit CommissionManagerUpdated(address(cm), newCm);
+
+        proxy.executeProposal(id, abi.encode(newCm));
+        assertEq(proxy.commissionManager(), newCm);
+    }
+
+    // ========================================================================
+    // Propose + Execute — WithdrawTokenCommissionCM
+    // ========================================================================
+
+    function test_proposeWithdrawTokenCommissionCM_execute() public {
+        // Seed commission by setting a fundsIn TOKEN rule and doing a deposit.
+        vm.prank(address(proxy));
+        cm.setCommissionRule(
+            SOURCE_CHAIN, DST_CHAIN, address(token),
+            CommissionConfig({
+                stablePercent: 400, // 4%
+                multiplier: 100,
+                side: CommissionSide.FUNDS_IN,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        uint256 depositAmount = 100e18;
+        vm.prank(user);
+        bridge.fundsIn(depositAmount, DST_CHAIN, DST_ADDR, NONCE_OP + 1, TX_ID + 1);
+
+        uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
+        assertEq(cm.tokenCommissionPool(address(token)), expectedCommission);
+
+        // Propose withdrawal.
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeWithdrawTokenCommissionCM(
+            domainSep, address(token), expectedCommission, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeWithdrawTokenCommissionCM(
+            address(token), expectedCommission, nonce, deadline, bitmap, sigs
+        );
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        uint256 recipientBefore = token.balanceOf(commissionReceiver);
+
+        vm.expectEmit(true, true, false, true);
+        emit CommissionWithdrawn(address(token), expectedCommission, commissionReceiver);
+
+        proxy.executeProposal(id, abi.encode(address(token), expectedCommission));
+
+        assertEq(token.balanceOf(commissionReceiver), recipientBefore + expectedCommission);
+        assertEq(cm.tokenCommissionPool(address(token)), 0);
+    }
+
+    // ========================================================================
     // Cancel
     // ========================================================================
 
@@ -578,7 +680,6 @@ contract MultisigProxyTest is Test {
 
         bytes32 id = proxy.proposeUpdateBridge(newBridge, nonce, deadline, bitmap, sigs);
 
-        // Cancel with a fresh nonce
         uint256 cNonce = proxy.proposalNonce();
         uint256 cDeadline = block.timestamp + 1 hours;
         bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cNonce, cDeadline);
@@ -591,7 +692,6 @@ contract MultisigProxyTest is Test {
         IMultisigProxy.Proposal memory p = proxy.getProposal(id);
         assertEq(uint8(p.status), uint8(IMultisigProxy.ProposalStatus.Cancelled));
 
-        // cannot execute cancelled proposal
         vm.warp(block.timestamp + TIMELOCK + 1);
         vm.expectRevert(IMultisigProxy.NotPending.selector);
         proxy.executeProposal(id, abi.encode(newBridge));
@@ -640,7 +740,6 @@ contract MultisigProxyTest is Test {
 
         bytes32 id = proxy.proposeUpdateBridge(newBridge, nonce, deadline, bitmap, sigs);
 
-        // warp past deadline
         vm.warp(deadline + 1);
         vm.expectRevert(IMultisigProxy.ProposalExpired.selector);
         proxy.executeProposal(id, abi.encode(newBridge));

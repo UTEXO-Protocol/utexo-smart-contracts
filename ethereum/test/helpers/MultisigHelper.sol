@@ -54,6 +54,22 @@ library MultisigHelper {
         'CancelProposal(bytes32 proposalId,uint256 nonce,uint256 deadline)'
     );
 
+    bytes32 internal constant PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH = keccak256(
+        'ProposeAdminExecuteCommissionManager(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
+    );
+
+    bytes32 internal constant PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH = keccak256(
+        'ProposeWithdrawTokenCommissionCM(address token,uint256 amount,uint256 nonce,uint256 deadline)'
+    );
+
+    bytes32 internal constant PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH = keccak256(
+        'ProposeWithdrawNativeCommissionCM(uint256 amount,uint256 nonce,uint256 deadline)'
+    );
+
+    bytes32 internal constant PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH = keccak256(
+        'ProposeUpdateCommissionManager(address newCommissionManager,uint256 nonce,uint256 deadline)'
+    );
+
     /// @dev Builds the EIP-712 domain separator the same way MultisigProxy does.
     function domainSeparator(address verifyingContract, uint256 chainId) internal pure returns (bytes32) {
         return keccak256(abi.encode(
@@ -172,6 +188,52 @@ library MultisigHelper {
     ) internal pure returns (bytes32) {
         return toTypedDataHash(domainSep, keccak256(abi.encode(
             PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH, newDuration, nonce, deadline
+        )));
+    }
+
+    function digestProposeAdminExecuteCM(
+        bytes32 domainSep,
+        bytes4 selector,
+        bytes memory callData,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(
+            PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, selector, keccak256(callData), nonce, deadline
+        )));
+    }
+
+    function digestProposeWithdrawTokenCommissionCM(
+        bytes32 domainSep,
+        address token,
+        uint256 amount,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(
+            PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH, token, amount, nonce, deadline
+        )));
+    }
+
+    function digestProposeWithdrawNativeCommissionCM(
+        bytes32 domainSep,
+        uint256 amount,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(
+            PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH, amount, nonce, deadline
+        )));
+    }
+
+    function digestProposeUpdateCommissionManager(
+        bytes32 domainSep,
+        address newCm,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(
+            PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH, newCm, nonce, deadline
         )));
     }
 

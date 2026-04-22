@@ -12,6 +12,7 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     address public bridge;
+    address public commissionManager;
 
     address[] private _enclaveSigners;
     uint256 public enclaveThreshold;
@@ -54,7 +55,7 @@ contract MultisigProxy is IMultisigProxy {
         'BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
     );
 
-    // Federation propose — typed EIP-712 structs per operation
+    // Federation propose — typed EIP-712 structs per operation (Bridge side)
     bytes32 private constant _PROPOSE_ADMIN_EXECUTE_TYPEHASH = keccak256(
         'ProposeAdminExecute(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
     );
@@ -73,14 +74,22 @@ contract MultisigProxy is IMultisigProxy {
     bytes32 private constant _PROPOSE_SET_TEE_SELECTOR_TYPEHASH = keccak256(
         'ProposeSetTeeAllowedSelector(bytes4 selector,bool allowed,uint256 nonce,uint256 deadline)'
     );
-    bytes32 private constant _PROPOSE_WITHDRAW_COMMISSION_TYPEHASH = keccak256(
-        'ProposeWithdrawCommission(address token,uint256 amount,uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _PROPOSE_WITHDRAW_NATIVE_COMMISSION_TYPEHASH = keccak256(
-        'ProposeWithdrawNativeCommission(uint256 amount,uint256 nonce,uint256 deadline)'
-    );
     bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH = keccak256(
         'ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)'
+    );
+
+    // Federation propose — CommissionManager side
+    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH = keccak256(
+        'ProposeAdminExecuteCommissionManager(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH = keccak256(
+        'ProposeWithdrawTokenCommissionCM(address token,uint256 amount,uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH = keccak256(
+        'ProposeWithdrawNativeCommissionCM(uint256 amount,uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH = keccak256(
+        'ProposeUpdateCommissionManager(address newCommissionManager,uint256 nonce,uint256 deadline)'
     );
 
     // Cancel
@@ -102,6 +111,7 @@ contract MultisigProxy is IMultisigProxy {
 
     constructor(
         address bridge_,
+        address commissionManager_,
         address[] memory enclaveSigners_,
         uint256 enclaveThreshold_,
         address[] memory federationSigners_,
@@ -110,6 +120,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 timelockDuration_
     ) {
         if (bridge_ == address(0)) revert ZeroBridge();
+        if (commissionManager_ == address(0)) revert ZeroCommissionManager();
         if (enclaveSigners_.length == 0) revert NoSigners();
         if (enclaveThreshold_ == 0 || enclaveThreshold_ > enclaveSigners_.length) revert InvalidThreshold();
         if (federationSigners_.length == 0) revert NoSigners();
@@ -121,6 +132,7 @@ contract MultisigProxy is IMultisigProxy {
         _validateSigners(federationSigners_);
 
         bridge = bridge_;
+        commissionManager = commissionManager_;
         _enclaveSigners = enclaveSigners_;
         enclaveThreshold = enclaveThreshold_;
         _federationSigners = federationSigners_;
@@ -128,8 +140,12 @@ contract MultisigProxy is IMultisigProxy {
         commissionRecipient = commissionRecipient_;
         timelockDuration = timelockDuration_;
 
-        // Default TEE allowlist
-        teeAllowedSelectors[bytes4(keccak256('fundsOut(address,uint256,uint256,string,string,uint256,bytes32,uint256[])'))] = true;
+        // Default TEE allowlist (Bridge.fundsOut new signature with destChain).
+        teeAllowedSelectors[
+            bytes4(keccak256(
+                'fundsOut(address,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+            ))
+        ] = true;
 
         DOMAIN_SEPARATOR = keccak256(abi.encode(
             _DOMAIN_TYPEHASH,
@@ -223,7 +239,7 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     // =========================================================================
-    // Federation propose (Phase 1)
+    // Federation propose (Phase 1) — Bridge side
     // =========================================================================
 
     /// @inheritdoc IMultisigProxy
@@ -243,7 +259,6 @@ contract MultisigProxy is IMultisigProxy {
             _PROPOSE_ADMIN_EXECUTE_TYPEHASH, selector, keccak256(callData), nonce, deadline
         ));
 
-        // opData for AdminExecute = raw bridge callData
         return _propose(OperationType.AdminExecute, callData, nonce, deadline, structHash, fedBitmap, fedSigs);
     }
 
@@ -348,45 +363,6 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     /// @inheritdoc IMultisigProxy
-    function proposeWithdrawCommission(
-        address token,
-        uint256 amount,
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_WITHDRAW_COMMISSION_TYPEHASH, token, amount, nonce, deadline
-        ));
-
-        return _propose(
-            OperationType.WithdrawCommission,
-            abi.encode(token, amount),
-            nonce, deadline, structHash, fedBitmap, fedSigs
-        );
-    }
-
-    /// @inheritdoc IMultisigProxy
-    function proposeWithdrawNativeCommission(
-        uint256 amount,
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_WITHDRAW_NATIVE_COMMISSION_TYPEHASH, amount, nonce, deadline
-        ));
-
-        return _propose(
-            OperationType.WithdrawNativeCommission,
-            abi.encode(amount),
-            nonce, deadline, structHash, fedBitmap, fedSigs
-        );
-    }
-
-    /// @inheritdoc IMultisigProxy
     function proposeSetTimelockDuration(
         uint256 newDuration,
         uint256 nonce,
@@ -401,6 +377,92 @@ contract MultisigProxy is IMultisigProxy {
         return _propose(
             OperationType.SetTimelockDuration,
             abi.encode(newDuration),
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    // =========================================================================
+    // Federation propose (Phase 1) — CommissionManager side
+    // =========================================================================
+
+    /// @inheritdoc IMultisigProxy
+    function proposeAdminExecuteCommissionManager(
+        bytes calldata callData,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        if (callData.length < 4) revert CallDataTooShort();
+
+        bytes4 selector;
+        assembly { selector := calldataload(callData.offset) }
+
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, selector, keccak256(callData), nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.AdminExecuteCommissionManager,
+            callData,
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeWithdrawTokenCommissionCM(
+        address token,
+        uint256 amount,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH, token, amount, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.WithdrawTokenCommissionCM,
+            abi.encode(token, amount),
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeWithdrawNativeCommissionCM(
+        uint256 amount,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH, amount, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.WithdrawNativeCommissionCM,
+            abi.encode(amount),
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeUpdateCommissionManager(
+        address newCommissionManager,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH, newCommissionManager, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.UpdateCommissionManager,
+            abi.encode(newCommissionManager),
             nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
@@ -575,29 +637,48 @@ contract MultisigProxy is IMultisigProxy {
             teeAllowedSelectors[sel] = allowed;
             emit TeeAllowedSelectorUpdated(sel, allowed);
 
-        } else if (opType == OperationType.WithdrawCommission) {
-            (address token, uint256 amount) = abi.decode(opData, (address, uint256));
-            address recipient = commissionRecipient;
-            (bool ok, bytes memory ret) = bridge.call(
-                abi.encodeWithSignature('withdrawCommission(address,uint256,address)', token, amount, recipient)
-            );
-            _propagateRevert(ok, ret);
-            emit CommissionWithdrawn(token, amount, recipient);
-
-        } else if (opType == OperationType.WithdrawNativeCommission) {
-            uint256 amount = abi.decode(opData, (uint256));
-            address recipient = commissionRecipient;
-            (bool ok, bytes memory ret) = bridge.call(
-                abi.encodeWithSignature('withdrawNativeCommission(uint256,address)', amount, recipient)
-            );
-            _propagateRevert(ok, ret);
-            emit NativeCommissionWithdrawn(amount, recipient);
-
         } else if (opType == OperationType.SetTimelockDuration) {
             uint256 newDuration = abi.decode(opData, (uint256));
             if (newDuration >= MAX_PROPOSAL_LIFETIME) revert TimelockTooLong();
             timelockDuration = newDuration;
             emit TimelockDurationUpdated(newDuration);
+
+        } else if (opType == OperationType.AdminExecuteCommissionManager) {
+            // opData = raw CommissionManager callData
+            (bool ok, bytes memory ret) = commissionManager.call(opData);
+            _propagateRevert(ok, ret);
+
+        } else if (opType == OperationType.WithdrawTokenCommissionCM) {
+            (address token, uint256 amount) = abi.decode(opData, (address, uint256));
+            address recipient = commissionRecipient;
+            (bool ok, bytes memory ret) = commissionManager.call(
+                abi.encodeWithSignature(
+                    'withdrawTokenCommission(address,address,uint256)',
+                    token, recipient, amount
+                )
+            );
+            _propagateRevert(ok, ret);
+            emit CommissionWithdrawn(token, amount, recipient);
+
+        } else if (opType == OperationType.WithdrawNativeCommissionCM) {
+            uint256 amount = abi.decode(opData, (uint256));
+            address recipient = commissionRecipient;
+            (bool ok, bytes memory ret) = commissionManager.call(
+                abi.encodeWithSignature(
+                    'withdrawNativeCommission(address,uint256)',
+                    recipient, amount
+                )
+            );
+            _propagateRevert(ok, ret);
+            emit NativeCommissionWithdrawn(amount, recipient);
+
+        } else if (opType == OperationType.UpdateCommissionManager) {
+            address newCm = abi.decode(opData, (address));
+            if (newCm == address(0)) revert ZeroCommissionManager();
+            address old = commissionManager;
+            commissionManager = newCm;
+            emit CommissionManagerUpdated(old, newCm);
+
         } else {
             revert UnknownOperationType();
         }
