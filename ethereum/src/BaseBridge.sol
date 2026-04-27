@@ -49,7 +49,7 @@ contract BaseBridge is BridgeBase {
         uint256 amount,
         uint256 operationId
     ) external whenNotPaused {
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(TOKEN).safeTransferFrom(msg.sender, address(this), amount);
 
         emit FundsIn(msg.sender, operationId, amount);
     }
@@ -70,9 +70,9 @@ contract BaseBridge is BridgeBase {
         string  calldata sourceAddress
     ) external onlyOwner {
         if (recipient == address(0)) revert InvalidRecipientAddress();
-        if (amount > IERC20(token).balanceOf(address(this))) revert AmountExceedBridgePool();
+        if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 
-        IERC20(token).safeTransfer(recipient, amount);
+        IERC20(TOKEN).safeTransfer(recipient, amount);
 
         emit FundsOut(recipient, amount, operationId, sourceAddress);
     }

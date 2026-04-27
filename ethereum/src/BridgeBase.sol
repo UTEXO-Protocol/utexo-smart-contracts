@@ -21,7 +21,7 @@ abstract contract BridgeBase is Ownable, Pausable {
     // =========================================================================
 
     /// @notice The only accepted ERC-20 token. Immutable after deploy.
-    address public immutable token;
+    address public immutable TOKEN;
 
     // =========================================================================
     // Events
@@ -52,7 +52,7 @@ abstract contract BridgeBase is Ownable, Pausable {
 
     constructor(address token_) Ownable(msg.sender) {
         if (token_ == address(0)) revert InvalidTokenAddress();
-        token = token_;
+        TOKEN = token_;
     }
 
     // =========================================================================
@@ -76,7 +76,7 @@ abstract contract BridgeBase is Ownable, Pausable {
 
     /// @notice Returns the token balance held by the contract (bridgeable liquidity).
     function getContractBalance() external view returns (uint256) {
-        return IERC20(token).balanceOf(address(this));
+        return IERC20(TOKEN).balanceOf(address(this));
     }
 
     /// @notice Returns the current chain ID.

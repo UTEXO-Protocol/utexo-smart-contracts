@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 /// @title IMultisigProxy
-/// @notice Two-level ECDSA multisig proxy that owns the Bridge.
+/// @notice Two-level ECDSA multisig proxy that owns the Bridge and the CommissionManager.
 ///
 /// @dev ENCLAVE SIGNERS (TEE / Nitro Enclave)
 ///      Authorise routine bridge value-transfer operations via `execute()`.
@@ -14,6 +14,14 @@ pragma solidity ^0.8.20;
 ///        Phase 1 — PROPOSE: federation signs, contract stores hash, emits full data.
 ///        Phase 2 — EXECUTE: after timelockDuration, anyone can call executeProposal().
 ///      Exception: emergencyPause / emergencyUnpause are instant (no timelock).
+///
+///      COMMISSION MANAGER
+///      This proxy is the owner of the CommissionManager. Federation can reach CM via:
+///        - typed `WithdrawTokenCommissionCM` / `WithdrawNativeCommissionCM`
+///          (destination is always the stored `commissionRecipient`).
+///        - generic `AdminExecuteCommissionManager` for rare config changes
+///          (route rules, global defaults, mock rates, transferOwnership, …).
+///        - `UpdateCommissionManager` to migrate to a redeployed CM.
 ///
 ///      BITMAP ENCODING
 ///      Bit i of bitmap corresponds to signers[i]. sigs[] in ascending bit order.
@@ -27,6 +35,7 @@ interface IMultisigProxy {
     // =========================================================================
 
     error ZeroBridge();
+    error ZeroCommissionManager();
     error NoSigners();
     error InvalidThreshold();
     error ZeroCommissionRecipient();
@@ -57,15 +66,17 @@ interface IMultisigProxy {
     // =========================================================================
 
     enum OperationType {
-        AdminExecute,
-        UpdateEnclaveSigners,
-        UpdateFederationSigners,
-        UpdateBridge,
-        SetCommissionRecipient,
-        SetTeeAllowedSelector,
-        WithdrawCommission,
-        WithdrawNativeCommission,
-        SetTimelockDuration
+        AdminExecute,                    // 0 — generic call into Bridge
+        UpdateEnclaveSigners,            // 1
+        UpdateFederationSigners,         // 2
+        UpdateBridge,                    // 3
+        SetCommissionRecipient,          // 4
+        SetTeeAllowedSelector,           // 5
+        SetTimelockDuration,             // 6
+        AdminExecuteCommissionManager,   // 7 — generic call into CommissionManager
+        WithdrawTokenCommissionCM,       // 8 — CM.withdrawTokenCommission -> commissionRecipient
+        WithdrawNativeCommissionCM,      // 9 — CM.withdrawNativeCommission -> commissionRecipient
+        UpdateCommissionManager          // 10 — migrate to a new CommissionManager address
     }
 
     enum ProposalStatus { None, Pending, Executed, Cancelled }
@@ -105,6 +116,7 @@ interface IMultisigProxy {
     event EnclaveSignersUpdated(address[] newSigners, uint256 newThreshold);
     event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
+    event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
     event CommissionRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
     event TeeAllowedSelectorUpdated(bytes4 indexed selector, bool allowed);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
@@ -191,7 +203,8 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose changing the commission recipient.
+    /// @notice Propose changing the commission recipient (used as the destination for
+    ///         all typed `WithdrawTokenCommissionCM` / `WithdrawNativeCommissionCM` ops).
     /// @dev opData = abi.encode(address newRecipient)
     function proposeSetCommissionRecipient(
         address newRecipient,
@@ -212,9 +225,34 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose ERC-20 commission withdrawal.
+    /// @notice Propose changing the timelock duration.
+    /// @dev opData = abi.encode(uint256 newDuration)
+    function proposeSetTimelockDuration(
+        uint256 newDuration,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    // --- CommissionManager-targeted operations ---
+
+    /// @notice Propose an arbitrary call into the CommissionManager.
+    /// @dev Used for rare configuration: setCommissionRule, setGlobalDefaults,
+    ///      setMockTokenToNativeRate, setBridgeAddress, transferOwnership, …
+    /// @dev opData = raw ABI-encoded CommissionManager callData (selector + args).
+    function proposeAdminExecuteCommissionManager(
+        bytes calldata callData,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    /// @notice Propose an ERC-20 commission withdrawal from the CommissionManager
+    ///         to the stored `commissionRecipient`.
     /// @dev opData = abi.encode(address token, uint256 amount)
-    function proposeWithdrawCommission(
+    function proposeWithdrawTokenCommissionCM(
         address token,
         uint256 amount,
         uint256 nonce,
@@ -223,9 +261,10 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose native commission withdrawal.
+    /// @notice Propose a native commission withdrawal from the CommissionManager
+    ///         to the stored `commissionRecipient`.
     /// @dev opData = abi.encode(uint256 amount)
-    function proposeWithdrawNativeCommission(
+    function proposeWithdrawNativeCommissionCM(
         uint256 amount,
         uint256 nonce,
         uint256 deadline,
@@ -233,10 +272,10 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose changing the timelock duration.
-    /// @dev opData = abi.encode(uint256 newDuration)
-    function proposeSetTimelockDuration(
-        uint256 newDuration,
+    /// @notice Propose migrating to a new CommissionManager address.
+    /// @dev opData = abi.encode(address newCommissionManager)
+    function proposeUpdateCommissionManager(
+        address newCommissionManager,
         uint256 nonce,
         uint256 deadline,
         uint256 fedBitmap,
@@ -266,10 +305,6 @@ interface IMultisigProxy {
     // =========================================================================
 
     /// @notice Verify that `signature` over `digest` was produced by the enclave signer at `signerIndex`.
-    /// @param digest The EIP-191 message hash that was signed.
-    /// @param signature The ECDSA signature bytes.
-    /// @param signerIndex Index into the enclave signers array.
-    /// @return True if the recovered address matches _enclaveSigners[signerIndex].
     function verifyEnclaveSignature(
         bytes32 digest,
         bytes calldata signature,
@@ -278,6 +313,7 @@ interface IMultisigProxy {
 
     function getNonce(bytes4 selector) external view returns (uint256);
     function bridge() external view returns (address);
+    function commissionManager() external view returns (address);
     function getEnclaveSigners() external view returns (address[] memory);
     function enclaveThreshold() external view returns (uint256);
     function getFederationSigners() external view returns (address[] memory);

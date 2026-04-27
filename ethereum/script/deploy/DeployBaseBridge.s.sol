@@ -27,6 +27,6 @@ contract DeployBaseBridge is Script {
 
         console2.log('BaseBridge deployed at:', address(bridge));
         console2.log('Owner (deployer):      ', bridge.owner());
-        console2.log('Token:                 ', bridge.token());
+        console2.log('Token:                 ', bridge.TOKEN());
     }
 }

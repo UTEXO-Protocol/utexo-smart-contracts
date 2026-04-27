@@ -13,39 +13,54 @@ import { MultisigHelper } from '../../test/helpers/MultisigHelper.sol';
 /// Env:
 ///   PRIVATE_KEY             — tx submitter (anyone)
 ///   PROXY_ADDRESS           — MultisigProxy address
-///   TOKEN_ADDRESS           — ERC-20 to release
 ///   RECIPIENT               — destination address
-///   AMOUNT (wei)            — amount to release
+///   AMOUNT (wei)            — gross amount to release (before commission)
 ///   TX_ID                   — transaction id
 ///   SOURCE_CHAIN            — source chain string
+///   DEST_CHAIN              — destination chain string (used for commission routing)
 ///   SOURCE_ADDRESS          — source address string
+///   BLOCK_HEIGHT            — Bitcoin block height (verified by BtcRelay)
+///   COMMITMENT_HASH         — Bitcoin block commitment hash (verified by BtcRelay)
+///   FUNDS_IN_IDS            — comma-separated fundsIn transaction IDs to reference
 ///   ENCLAVE_PKS             — comma-separated hex private keys (ordered by signer index)
 ///   ENCLAVE_BITMAP          — bitmap of participating signers (hex or decimal)
 ///   DEADLINE_OFFSET         — seconds from now (e.g. 3600)
 contract MultisigExecuteFundsOut is Script {
-    bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256('fundsOut(address,address,uint256,uint256,string,string)'));
+    // New 9-arg fundsOut signature (adds destChain).
+    bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
+        'fundsOut(address,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+    ));
 
     struct Params {
-        address token;
         address recipient;
         uint256 amount;
         uint256 txId;
         string  srcChain;
+        string  dstChain;
         string  srcAddr;
+        uint256 blockHeight;
+        bytes32 commitmentHash;
+        uint256[] fundsInIds;
     }
 
     function _loadParams() internal view returns (Params memory p) {
-        p.token     = vm.envAddress('TOKEN_ADDRESS');
-        p.recipient = vm.envAddress('RECIPIENT');
-        p.amount    = vm.envUint('AMOUNT');
-        p.txId      = vm.envUint('TX_ID');
-        p.srcChain  = vm.envString('SOURCE_CHAIN');
-        p.srcAddr   = vm.envString('SOURCE_ADDRESS');
+        p.recipient      = vm.envAddress('RECIPIENT');
+        p.amount         = vm.envUint('AMOUNT');
+        p.txId           = vm.envUint('TX_ID');
+        p.srcChain       = vm.envString('SOURCE_CHAIN');
+        p.dstChain       = vm.envString('DEST_CHAIN');
+        p.srcAddr        = vm.envString('SOURCE_ADDRESS');
+        p.blockHeight    = vm.envUint('BLOCK_HEIGHT');
+        p.commitmentHash = vm.envBytes32('COMMITMENT_HASH');
+        p.fundsInIds     = vm.envUint('FUNDS_IN_IDS', ',');
     }
 
     function _buildCallData(Params memory p) internal pure returns (bytes memory) {
         return abi.encodeWithSelector(
-            FUNDS_OUT_SELECTOR, p.token, p.recipient, p.amount, p.txId, p.srcChain, p.srcAddr
+            FUNDS_OUT_SELECTOR,
+            p.recipient, p.amount, p.txId,
+            p.srcChain, p.dstChain, p.srcAddr,
+            p.blockHeight, p.commitmentHash, p.fundsInIds
         );
     }
 
