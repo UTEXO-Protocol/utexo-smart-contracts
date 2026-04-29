@@ -140,10 +140,10 @@ contract MultisigProxy is IMultisigProxy {
         commissionRecipient = commissionRecipient_;
         timelockDuration = timelockDuration_;
 
-        // Default TEE allowlist (Bridge.fundsOut new signature with destChain).
+        // Default TEE allowlist (Bridge.fundsOut signature).
         teeAllowedSelectors[
             bytes4(keccak256(
-                'fundsOut(address,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+                'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
             ))
         ] = true;
 

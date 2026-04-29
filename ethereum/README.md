@@ -32,7 +32,7 @@ Constructor takes four immutable addresses/values: the accepted ERC-20 token, th
 - `fundsIn(amount, destinationChain, destinationAddress, nonce, transactionId)` — open, **`payable`**. Quotes commission from `CommissionManager` using route key `(sourceChainName, destinationChain, TOKEN)`; if the route uses NATIVE currency, `msg.value` must equal the quoted native commission. Pulls the full `amount` in tokens from the sender, forwards any token/native commission to `CommissionManager`, and stores `transactionId => netAmount` in `fundsInRecords`. Emits two events:
   - `FundsIn` (from `BridgeBase`) — minimal, uses `netAmount`.
   - `BridgeFundsIn` (from `IBridge`) — full, consumed by the UTEXO backend.
-- `fundsOut(recipient, amount, transactionId, sourceChain, destChain, sourceAddress, blockHeight, commitmentHash, fundsInIds)` — `onlyOwner`, called via `MultisigProxy.execute()`. Verifies referenced fundsIn operations exist on-chain (prevents double-spend and fake event attacks on TEE), verifies the Bitcoin block header via BtcRelay, quotes commission from `CommissionManager` using `(sourceChain, destChain, TOKEN)`, forwards any token commission to the pool, and releases `netAmount` to the recipient. Emits `BridgeFundsOut`. NATIVE commission on `fundsOut` is disallowed (the caller is the multisig, not a user) — the contract reverts `NativeCommissionNotAllowedOnFundsOut`.
+- `fundsOut(recipient, amount, transactionId, burnId, sourceChain, destChain, sourceAddress, blockHeight, commitmentHash, fundsInIds)` — `onlyOwner`, called via `MultisigProxy.execute()`. Checks `burnId` has not been consumed yet (single-use replay guard, marks it consumed before any external interaction), verifies referenced fundsIn operations exist on-chain (prevents double-spend and fake event attacks on TEE), verifies the Bitcoin block header via BtcRelay, quotes commission from `CommissionManager` using `(sourceChain, destChain, TOKEN)`, forwards any token commission to the pool, and releases `netAmount` to the recipient. Emits `BridgeFundsOut`. NATIVE commission on `fundsOut` is disallowed (the caller is the multisig, not a user) — the contract reverts `NativeCommissionNotAllowedOnFundsOut`.
 
 Owner **must** be `MultisigProxy`. `fundsOut` is only reachable through `MultisigProxy.execute()` which requires M-of-N TEE signatures.
 
@@ -43,6 +43,10 @@ Every `fundsIn` stores `transactionId => netAmount` in the `fundsInRecords` mapp
 - **Double-spend:** each fundsIn record can only be consumed once.
 
 Note: records store the **net** amount (post-commission), i.e. the actual bridged liquidity. Gross amounts are available in the `BridgeFundsIn` event for backend bookkeeping.
+
+#### Burn-id replay guard (single-use)
+
+Every `fundsOut` call carries a `burnId` — an identifier the backend extracts from the source-side burn consignment. The `Bridge` keeps a `consumedBurnIds` mapping and **rejects** any call whose `burnId` is already recorded (`BurnIdAlreadyConsumed`). The flag is set before any token transfer (CEI ordering), so a revert anywhere downstream rolls the mark back together with the rest of the call. This complements `MultisigProxy`'s per-selector nonce: nonces stop a signature bundle from being executed twice, while `burnId` stops the same logical burn from being settled twice even under independent signature bundles.
 
 #### BtcRelay integration
 
@@ -91,12 +95,13 @@ Federation-controlled operations (`OperationType`):
 
 ### FundsOut (bridge withdrawals)
 
-`Bridge.fundsOut()` is `onlyOwner`, where the owner is `MultisigProxy`. The backend collects M-of-N ECDSA signatures from TEE signers over an EIP-712 `BridgeOperation` message (selector, callData, nonce, deadline). The call data includes `blockHeight` and `commitmentHash` for BtcRelay verification, plus `destChain` so CommissionManager can pick the right outbound route. `MultisigProxy.execute()` verifies the signatures on-chain and forwards the call to `Bridge`, which then:
+`Bridge.fundsOut()` is `onlyOwner`, where the owner is `MultisigProxy`. The backend collects M-of-N ECDSA signatures from TEE signers over an EIP-712 `BridgeOperation` message (selector, callData, nonce, deadline). The call data includes `burnId` (replay guard for the source-side burn), `blockHeight` and `commitmentHash` for BtcRelay verification, plus `destChain` so CommissionManager can pick the right outbound route. `MultisigProxy.execute()` verifies the signatures on-chain and forwards the call to `Bridge`, which then:
 
-1. Verifies the referenced `fundsInIds` exist and consumes them.
-2. Verifies the Bitcoin block header against BtcRelay.
-3. Quotes outbound commission via `CommissionManager.calculateFundsOutCommission(sourceChain, destChain, token, amount)`.
-4. Forwards any token commission to `CommissionManager` and releases `netAmount` to the recipient.
+1. Checks `burnId` has not been consumed yet and marks it consumed (replay guard).
+2. Verifies the referenced `fundsInIds` exist and consumes them.
+3. Verifies the Bitcoin block header against BtcRelay.
+4. Quotes outbound commission via `CommissionManager.calculateFundsOutCommission(sourceChain, destChain, token, amount)`.
+5. Forwards any token commission to `CommissionManager` and releases `netAmount` to the recipient.
 
 ### Federation governance (two-phase timelock)
 
@@ -190,7 +195,7 @@ Scripts in `script/interact/` let you exercise contracts manually before the bac
 | `BridgeFundsIn.s.sol` | Quotes commission from `CommissionManager`, approves tokens and calls `Bridge.fundsIn{ value: nativeCommission }(...)` |
 | `BaseBridgeFundsIn.s.sol` | Approves tokens and calls `BaseBridge.fundsIn(amount, operationId)` |
 | `BaseBridgeFundsOut.s.sol` | Calls `BaseBridge.fundsOut()` as owner |
-| `MultisigExecuteFundsOut.s.sol` | Signs a `Bridge.fundsOut()` locally with `ENCLAVE_PKS` (new 9-arg signature including `destChain`) and submits via `MultisigProxy.execute()` |
+| `MultisigExecuteFundsOut.s.sol` | Signs a `Bridge.fundsOut()` locally with `ENCLAVE_PKS` (10-arg signature including `destChain` and `burnId`) and submits via `MultisigProxy.execute()` |
 | `EmergencyPause.s.sol` | Signs and submits `MultisigProxy.emergencyPause()` with `FED_PKS` |
 | `EmergencyUnpause.s.sol` | Signs and submits `MultisigProxy.emergencyUnpause()` with `FED_PKS` |
 
@@ -211,7 +216,7 @@ forge script script/interact/BridgeFundsIn.s.sol --rpc-url $RPC_URL --broadcast
 5. Verify source chain name: `Bridge.sourceChainName()` matches the expected `SOURCE_CHAIN_NAME`.
 6. Verify enclave signers: `MultisigProxy.getEnclaveSigners()` returns the TEE addresses.
 7. Verify federation signers: `MultisigProxy.getFederationSigners()` returns the governance addresses.
-8. Verify TEE-allowed selector: `MultisigProxy.teeAllowedSelectors(fundsOutSelector)` returns `true` (selector for the 9-arg `fundsOut` signature with `destChain`).
+8. Verify TEE-allowed selector: `MultisigProxy.teeAllowedSelectors(fundsOutSelector)` returns `true` (selector for the 10-arg `fundsOut` signature with `destChain` and `burnId`).
 9. Test `fundsIn` with a small amount (zero commission by default) to confirm token transfer and event emission.
 
 ## Project structure

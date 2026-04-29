@@ -16,6 +16,7 @@ import { MultisigHelper } from '../../test/helpers/MultisigHelper.sol';
 ///   RECIPIENT               — destination address
 ///   AMOUNT (wei)            — gross amount to release (before commission)
 ///   TX_ID                   — transaction id
+///   BURN_ID                 — burn consignment id (single-use replay guard)
 ///   SOURCE_CHAIN            — source chain string
 ///   DEST_CHAIN              — destination chain string (used for commission routing)
 ///   SOURCE_ADDRESS          — source address string
@@ -26,15 +27,16 @@ import { MultisigHelper } from '../../test/helpers/MultisigHelper.sol';
 ///   ENCLAVE_BITMAP          — bitmap of participating signers (hex or decimal)
 ///   DEADLINE_OFFSET         — seconds from now (e.g. 3600)
 contract MultisigExecuteFundsOut is Script {
-    // New 9-arg fundsOut signature (adds destChain).
+    // 10-arg fundsOut signature (adds destChain + burnId).
     bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+        'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
     ));
 
     struct Params {
         address recipient;
         uint256 amount;
         uint256 txId;
+        uint256 burnId;
         string  srcChain;
         string  dstChain;
         string  srcAddr;
@@ -47,6 +49,7 @@ contract MultisigExecuteFundsOut is Script {
         p.recipient      = vm.envAddress('RECIPIENT');
         p.amount         = vm.envUint('AMOUNT');
         p.txId           = vm.envUint('TX_ID');
+        p.burnId         = vm.envUint('BURN_ID');
         p.srcChain       = vm.envString('SOURCE_CHAIN');
         p.dstChain       = vm.envString('DEST_CHAIN');
         p.srcAddr        = vm.envString('SOURCE_ADDRESS');
@@ -58,7 +61,7 @@ contract MultisigExecuteFundsOut is Script {
     function _buildCallData(Params memory p) internal pure returns (bytes memory) {
         return abi.encodeWithSelector(
             FUNDS_OUT_SELECTOR,
-            p.recipient, p.amount, p.txId,
+            p.recipient, p.amount, p.txId, p.burnId,
             p.srcChain, p.dstChain, p.srcAddr,
             p.blockHeight, p.commitmentHash, p.fundsInIds
         );
