@@ -74,6 +74,7 @@ contract IntegrationTest is Test {
 
     uint256 constant TX_ID_IN   = 42;
     uint256 constant TX_ID_OUT  = 43;
+    uint256 constant BURN_ID    = 9_001;
     uint256 constant USER_NONCE = 7;
 
     uint256 constant BLOCK_HEIGHT      = 850_000;
@@ -83,7 +84,7 @@ contract IntegrationTest is Test {
     uint256 constant TIMELOCK = 1 hours;
 
     bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+        'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
     ));
 
     // =========================================================================
@@ -96,6 +97,7 @@ contract IntegrationTest is Test {
         uint256 netAmount,
         uint256 tokenCommission,
         uint256 transactionId,
+        uint256 burnId,
         string  sourceChain,
         string  destChain,
         string  sourceAddress,
@@ -238,6 +240,7 @@ contract IntegrationTest is Test {
             recipient,
             netBridgedIn,          // amount = full bridged pool from this deposit
             TX_ID_OUT,
+            BURN_ID,
             RGB_CHAIN,
             SOURCE_CHAIN,
             'rgb:sender/utxo1src',
@@ -263,6 +266,7 @@ contract IntegrationTest is Test {
             netOut,
             tokenCommissionOut,
             TX_ID_OUT,
+            BURN_ID,
             RGB_CHAIN,
             SOURCE_CHAIN,
             'rgb:sender/utxo1src',

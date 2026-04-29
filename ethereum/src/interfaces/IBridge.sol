@@ -12,6 +12,7 @@ interface IBridge {
     error InvalidCommissionManagerAddress();
     error InvalidSourceChainName();
     error DuplicateTransactionId();
+    error BurnIdAlreadyConsumed(uint256 burnId);
     error FundsInNotFound(uint256 transactionId);
     error FundsOutAmountExceedsFundsIn();
     error NativeCommissionNotAllowedOnFundsOut();
@@ -47,6 +48,8 @@ interface IBridge {
     /// @param netAmount        Amount actually delivered to `recipient`.
     /// @param tokenCommission  Fee taken in the bridged token (sent to the CommissionManager).
     /// @param transactionId    Backend-assigned transaction identifier.
+    /// @param burnId           Identifier extracted from the burn consignment on the
+    ///                         source side. Stored on-chain to block fundsOut replays.
     /// @param sourceChain      Source chain identifier.
     /// @param destChain        Destination chain identifier (used for commission routing).
     /// @param sourceAddress    Sender address on the source chain.
@@ -58,6 +61,7 @@ interface IBridge {
         uint256 netAmount,
         uint256 tokenCommission,
         uint256 transactionId,
+        uint256 burnId,
         string  sourceChain,
         string  destChain,
         string  sourceAddress,
@@ -90,10 +94,15 @@ interface IBridge {
     ///         Only callable by owner (MultisigProxy via execute()).
     /// @dev `destChain` is part of the CommissionManager route key and lets the
     ///      same Bridge serve multi-hop routes (e.g. BTC→Arbitrum→ETH via LayerZero).
+    /// @dev `burnId` is the identifier the backend extracts from the burn
+    ///      consignment on the source side. The contract records it on success
+    ///      and rejects any future call referencing the same `burnId` — this is
+    ///      the on-chain replay guard for fundsOut.
     function fundsOut(
         address recipient,
         uint256 amount,
         uint256 transactionId,
+        uint256 burnId,
         string  calldata sourceChain,
         string  calldata destChain,
         string  calldata sourceAddress,

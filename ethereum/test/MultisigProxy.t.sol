@@ -81,6 +81,7 @@ contract MultisigProxyTest is Test {
     string  constant SRC_ADDR     = 'rgb:sender/utxo1src';
     uint256 constant AMOUNT    = 100e18;
     uint256 constant TX_ID     = 42;
+    uint256 constant BURN_ID   = 9_001;
     uint256 constant NONCE_OP  = 7;
 
     // BtcRelay test data
@@ -89,7 +90,7 @@ contract MultisigProxyTest is Test {
     uint256 constant BTC_CONFIRMATIONS = 6;
 
     bytes4  constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+        'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
     ));
 
     function setUp() public {
@@ -171,7 +172,7 @@ contract MultisigProxyTest is Test {
     function _fundsOutCalldata() internal view returns (bytes memory) {
         return abi.encodeWithSelector(
             FUNDS_OUT_SELECTOR,
-            recipient, AMOUNT, TX_ID, SRC_CHAIN, DST_CHAIN_OUT, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _fundsInIds()
+            recipient, AMOUNT, TX_ID, BURN_ID, SRC_CHAIN, DST_CHAIN_OUT, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _fundsInIds()
         );
     }
 

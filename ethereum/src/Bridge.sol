@@ -48,6 +48,10 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///         used by fundsOut to verify that referenced deposits actually happened.
     mapping(uint256 => uint256) public fundsInRecords;
 
+    /// @notice Set of burn identifiers already consumed by a successful `fundsOut`.
+    ///         This mapping enforces single-use semantics on-chain.
+    mapping(uint256 => bool) public consumedBurnIds;
+
     // =========================================================================
     // Constructor
     // =========================================================================
@@ -154,6 +158,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         address recipient,
         uint256 amount,
         uint256 transactionId,
+        uint256 burnId,
         string  calldata sourceChain,
         string  calldata destChain,
         string  calldata sourceAddress,
@@ -163,6 +168,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ) external onlyOwner nonReentrant {
         if (recipient == address(0)) revert InvalidRecipientAddress();
         if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
+
+        // Set the flag before any external interaction so a revert
+        // anywhere downstream rolls back the mark together with the rest of the call.
+        if (consumedBurnIds[burnId]) revert BurnIdAlreadyConsumed(burnId);
+        consumedBurnIds[burnId] = true;
 
         // Verify referenced fundsIn operations exist and consume them.
         uint256 totalLocked;
@@ -208,6 +218,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             netAmount,
             tokenCommission,
             transactionId,
+            burnId,
             sourceChain,
             destChain,
             sourceAddress,
