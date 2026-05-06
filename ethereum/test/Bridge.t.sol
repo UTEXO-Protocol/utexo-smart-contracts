@@ -22,8 +22,7 @@ contract BridgeTest is Test {
     event FundsIn(address indexed sender, uint256 operationId, uint256 amount);
     event BridgeFundsIn(
         address indexed sender,
-        uint256 transactionId,
-        uint256 nonce,
+        uint256 operationId,
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
@@ -36,7 +35,7 @@ contract BridgeTest is Test {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 transactionId,
+        uint256 operationId,
         uint256 burnId,
         string  sourceChain,
         string  destChain,
@@ -65,7 +64,6 @@ contract BridgeTest is Test {
     uint256 constant AMOUNT       = 100e18;
     uint256 constant TX_ID        = 42;
     uint256 constant BURN_ID      = 9_001;
-    uint256 constant NONCE        = 7;
 
     // BtcRelay test data
     uint256 constant BLOCK_HEIGHT     = 850_000;
@@ -205,7 +203,7 @@ contract BridgeTest is Test {
         uint256 userBefore = usdt0.balanceOf(user);
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         assertEq(usdt0.balanceOf(address(bridge)), AMOUNT);
         assertEq(usdt0.balanceOf(user),            userBefore - AMOUNT);
@@ -213,7 +211,7 @@ contract BridgeTest is Test {
 
     function test_fundsIn_storesRecord() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         assertEq(bridge.fundsInRecords(TX_ID), AMOUNT);
     }
@@ -222,10 +220,10 @@ contract BridgeTest is Test {
         vm.expectEmit(true, false, false, true);
         emit FundsIn(user, TX_ID, AMOUNT);
         vm.expectEmit(true, false, false, true);
-        emit BridgeFundsIn(user, TX_ID, NONCE, AMOUNT, AMOUNT, 0, 0, DST_CHAIN, DST_ADDR);
+        emit BridgeFundsIn(user, TX_ID, AMOUNT, AMOUNT, 0, 0, DST_CHAIN, DST_ADDR);
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
     }
 
     function test_fundsIn_anyUserCanCall() public {
@@ -235,7 +233,7 @@ contract BridgeTest is Test {
         usdt0.approve(address(bridge), AMOUNT);
 
         vm.prank(stranger);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         assertEq(usdt0.balanceOf(address(bridge)), AMOUNT);
     }
@@ -247,13 +245,13 @@ contract BridgeTest is Test {
     function test_fundsIn_revertsOnEmptyDestinationAddress() public {
         vm.expectRevert(IBridge.InvalidDestinationAddress.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, '', NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, '', TX_ID);
     }
 
     function test_fundsIn_revertsOnEmptyDestinationChain() public {
         vm.expectRevert(IBridge.InvalidDestinationChain.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, '', DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, '', DST_ADDR, TX_ID);
     }
 
     function test_fundsIn_revertsWhenPaused() public {
@@ -262,16 +260,16 @@ contract BridgeTest is Test {
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
     }
 
-    function test_fundsIn_revertsOnDuplicateTransactionId() public {
+    function test_fundsIn_revertsOnDuplicateOperationId() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
-        vm.expectRevert(IBridge.DuplicateTransactionId.selector);
+        vm.expectRevert(IBridge.DuplicateOperationId.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
     }
 
     // ========================================================================
@@ -280,7 +278,7 @@ contract BridgeTest is Test {
 
     function test_fundsOut_transfersAndEmits() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         vm.expectEmit(true, false, false, true);
         emit BridgeFundsOut(
@@ -297,7 +295,7 @@ contract BridgeTest is Test {
 
     function test_fundsOut_consumesFundsInRecord() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         vm.prank(multisig);
         bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, SRC_CHAIN, DST_CHAIN_OUT, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
@@ -312,9 +310,9 @@ contract BridgeTest is Test {
         uint256 amount2 = 40e18;
 
         vm.prank(user);
-        bridge.fundsIn(amount1, DST_CHAIN, DST_ADDR, NONCE, txId1);
+        bridge.fundsIn(amount1, DST_CHAIN, DST_ADDR, txId1);
         vm.prank(user);
-        bridge.fundsIn(amount2, DST_CHAIN, DST_ADDR, NONCE, txId2);
+        bridge.fundsIn(amount2, DST_CHAIN, DST_ADDR, txId2);
 
         uint256[] memory ids = new uint256[](2);
         ids[0] = txId1;
@@ -328,16 +326,65 @@ contract BridgeTest is Test {
         assertEq(bridge.fundsInRecords(txId2), 0);
     }
 
-    function test_fundsOut_partialAmount() public {
+    function test_fundsOut_partialAmount_decrementsRecord() public {
+        // Single fundsIn of 100. fundsOut for 60 should decrement the record to 40
+        // (not delete it), preserving the residual liquidity for future fundsOut.
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
-        uint256 partialAmount = AMOUNT / 2;
+        uint256 partialAmount = 60e18;
 
         vm.prank(multisig);
         bridge.fundsOut(recipient, partialAmount, TX_ID, BURN_ID, SRC_CHAIN, DST_CHAIN_OUT, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
 
         assertEq(usdt0.balanceOf(recipient), partialAmount);
+        assertEq(bridge.fundsInRecords(TX_ID), AMOUNT - partialAmount, 'residual preserved');
+    }
+
+    function test_fundsOut_consumesPartiallyAcrossIds() public {
+        // Two records of 100 each. fundsOut for 150 should fully consume the first
+        // and partially consume the second (leaving 50).
+        uint256 txId1 = 100;
+        uint256 txId2 = 101;
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, txId1);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, txId2);
+
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = txId1;
+        ids[1] = txId2;
+
+        vm.prank(multisig);
+        bridge.fundsOut(recipient, 150e18, TX_ID, BURN_ID, SRC_CHAIN, DST_CHAIN_OUT, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, ids);
+
+        assertEq(usdt0.balanceOf(recipient), 150e18);
+        assertEq(bridge.fundsInRecords(txId1), 0,    'first id fully consumed');
+        assertEq(bridge.fundsInRecords(txId2), 50e18, 'second id partially consumed');
+    }
+
+    function test_fundsOut_breaksAfterAmountSatisfied() public {
+        // If TEE supplies more ids than needed, the loop must stop after the
+        // amount is satisfied — extra ids are NOT touched.
+        uint256 txId1 = 100;
+        uint256 txId2 = 101;
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, txId1);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, txId2);
+
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = txId1;
+        ids[1] = txId2;
+
+        // Amount of 50 < first record; second id should remain untouched.
+        vm.prank(multisig);
+        bridge.fundsOut(recipient, 50e18, TX_ID, BURN_ID, SRC_CHAIN, DST_CHAIN_OUT, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, ids);
+
+        assertEq(bridge.fundsInRecords(txId1), 50e18,  'first decremented');
+        assertEq(bridge.fundsInRecords(txId2), AMOUNT, 'second untouched');
     }
 
     // ========================================================================
@@ -346,7 +393,7 @@ contract BridgeTest is Test {
 
     function test_fundsOut_revertsOnUnverifiedBlock() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         uint256 unknownHeight = 999_999;
         bytes32 unknownHash = keccak256('unknown-block');
@@ -362,7 +409,7 @@ contract BridgeTest is Test {
 
     function test_fundsOut_revertsOnUnknownFundsInId() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         uint256[] memory ids = new uint256[](1);
         ids[0] = 999;
@@ -376,9 +423,9 @@ contract BridgeTest is Test {
         uint256 txId1 = 100;
         uint256 txId2 = 101;
         vm.prank(user);
-        bridge.fundsIn(50e18, DST_CHAIN, DST_ADDR, NONCE, txId1);
+        bridge.fundsIn(50e18, DST_CHAIN, DST_ADDR, txId1);
         vm.prank(user);
-        bridge.fundsIn(50e18, DST_CHAIN, DST_ADDR, NONCE, txId2);
+        bridge.fundsIn(50e18, DST_CHAIN, DST_ADDR, txId2);
 
         uint256[] memory ids = new uint256[](1);
         ids[0] = txId1;
@@ -394,9 +441,9 @@ contract BridgeTest is Test {
         uint256 txId1 = 200;
         uint256 txId2 = 201;
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, txId1);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, txId1);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, txId2);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, txId2);
 
         uint256[] memory ids1 = new uint256[](1);
         ids1[0] = txId1;
@@ -419,7 +466,7 @@ contract BridgeTest is Test {
 
     function test_fundsOut_revertsOnDoubleSpendsConsumedFundsIn() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         vm.prank(multisig);
         bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, SRC_CHAIN, DST_CHAIN_OUT, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
@@ -437,7 +484,7 @@ contract BridgeTest is Test {
 
     function test_fundsOut_revertsIfNotOwner() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
@@ -446,7 +493,7 @@ contract BridgeTest is Test {
 
     function test_fundsOut_revertsOnZeroRecipient() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         vm.expectRevert(BridgeBase.InvalidRecipientAddress.selector);
         vm.prank(multisig);
@@ -455,7 +502,7 @@ contract BridgeTest is Test {
 
     function test_fundsOut_revertsIfAmountExceedsPool() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         vm.expectRevert(BridgeBase.AmountExceedBridgePool.selector);
         vm.prank(multisig);
@@ -475,7 +522,7 @@ contract BridgeTest is Test {
         uint256 expectedNet        = AMOUNT - expectedCommission;
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         assertEq(usdt0.balanceOf(address(bridge)), expectedNet, 'bridge net');
         assertEq(usdt0.balanceOf(address(cm)),     expectedCommission, 'cm pool');
@@ -507,7 +554,7 @@ contract BridgeTest is Test {
 
         vm.deal(user, nativeC);
         vm.prank(user);
-        bridge.fundsIn{ value: nativeC }(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn{ value: nativeC }(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         // Bridge received full amount in token (no token commission).
         assertEq(usdt0.balanceOf(address(bridge)), AMOUNT);
@@ -525,7 +572,7 @@ contract BridgeTest is Test {
     function test_fundsOut_tokenCommission_routesToCM() public {
         // Deposit at zero commission first.
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         uint256 percent = 500; // 5%
         _setFundsOutTokenRule(percent);
@@ -547,7 +594,7 @@ contract BridgeTest is Test {
 
     function test_fundsOut_nativeCommission_reverts() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         _setFundsOutNativeRule(100);
         vm.prank(deployer);
@@ -567,7 +614,7 @@ contract BridgeTest is Test {
         vm.deal(user, 1 ether);
         vm.expectRevert(IBridge.NativeValueMismatch.selector);
         vm.prank(user);
-        bridge.fundsIn{ value: 1 ether }(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn{ value: 1 ether }(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
     }
 
     function test_fundsIn_revertsOnNativeValueMismatch_nativeRuleButNoValue() public {
@@ -577,7 +624,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert(IBridge.NativeValueMismatch.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
     }
 
     // ========================================================================
@@ -611,7 +658,7 @@ contract BridgeTest is Test {
 
     function test_getContractBalance() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(AMOUNT, DST_CHAIN, DST_ADDR, TX_ID);
 
         assertEq(bridge.getContractBalance(), AMOUNT);
     }
@@ -629,7 +676,7 @@ contract BridgeTest is Test {
         usdt0.mint(user, amount);
 
         vm.prank(user);
-        bridge.fundsIn(amount, DST_CHAIN, DST_ADDR, NONCE, TX_ID);
+        bridge.fundsIn(amount, DST_CHAIN, DST_ADDR, TX_ID);
 
         assertEq(usdt0.balanceOf(address(bridge)), amount);
         assertEq(bridge.fundsInRecords(TX_ID), amount);

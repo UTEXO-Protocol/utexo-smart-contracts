@@ -14,6 +14,10 @@ library MultisigHelper {
         'BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
     );
 
+    bytes32 internal constant BRIDGE_BATCH_OP_TYPEHASH = keccak256(
+        'BridgeBatchOperation(address[] targets,bytes[] callDatas,uint256[] values,uint256 nonce,uint256 deadline)'
+    );
+
     bytes32 internal constant EMERGENCY_PAUSE_TYPEHASH = keccak256(
         'EmergencyPause(uint256 nonce,uint256 deadline)'
     );
@@ -42,8 +46,8 @@ library MultisigHelper {
         'ProposeSetCommissionRecipient(address newRecipient,uint256 nonce,uint256 deadline)'
     );
 
-    bytes32 internal constant PROPOSE_SET_TEE_SELECTOR_TYPEHASH = keccak256(
-        'ProposeSetTeeAllowedSelector(bytes4 selector,bool allowed,uint256 nonce,uint256 deadline)'
+    bytes32 internal constant PROPOSE_SET_TEE_CALL_TYPEHASH = keccak256(
+        'ProposeSetTeeAllowedCall(address target,bytes4 selector,bool allowed,uint256 nonce,uint256 deadline)'
     );
 
     bytes32 internal constant PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH = keccak256(
@@ -111,6 +115,28 @@ library MultisigHelper {
         )));
     }
 
+    function digestBridgeBatchOp(
+        bytes32 domainSep,
+        address[] memory targets,
+        bytes[]   memory callDatas,
+        uint256[] memory values,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        bytes32[] memory cdHashes = new bytes32[](callDatas.length);
+        for (uint256 i = 0; i < callDatas.length; i++) {
+            cdHashes[i] = keccak256(callDatas[i]);
+        }
+        return toTypedDataHash(domainSep, keccak256(abi.encode(
+            BRIDGE_BATCH_OP_TYPEHASH,
+            keccak256(abi.encodePacked(targets)),
+            keccak256(abi.encodePacked(cdHashes)),
+            keccak256(abi.encodePacked(values)),
+            nonce,
+            deadline
+        )));
+    }
+
     function digestEmergencyPause(bytes32 domainSep, uint256 nonce, uint256 deadline) internal pure returns (bytes32) {
         return toTypedDataHash(domainSep, keccak256(abi.encode(EMERGENCY_PAUSE_TYPEHASH, nonce, deadline)));
     }
@@ -168,15 +194,16 @@ library MultisigHelper {
         )));
     }
 
-    function digestProposeSetTeeSelector(
+    function digestProposeSetTeeAllowedCall(
         bytes32 domainSep,
+        address target,
         bytes4 selector,
         bool allowed,
         uint256 nonce,
         uint256 deadline
     ) internal pure returns (bytes32) {
         return toTypedDataHash(domainSep, keccak256(abi.encode(
-            PROPOSE_SET_TEE_SELECTOR_TYPEHASH, selector, allowed, nonce, deadline
+            PROPOSE_SET_TEE_CALL_TYPEHASH, target, selector, allowed, nonce, deadline
         )));
     }
 

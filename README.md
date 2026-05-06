@@ -66,4 +66,4 @@ Each transfer deducts a service commission, configured per-route: source side (`
 
 ### Replay protection
 
-Each network enforces replay protection at the smart-contract level. On EVM the `Bridge` uses transaction-id mappings for `FundsIn` and per-selector sequential nonces on `MultisigProxy.execute` for `FundsOut`. In addition, every `FundsOut` call carries the `burnId` extracted from the source-side burn consignment; the `Bridge` records consumed `burnId`s on-chain and rejects any future `FundsOut` referencing the same id.
+Each network enforces replay protection at the smart-contract level. On EVM the `Bridge` uses operation-id mappings for `FundsIn` and per-selector sequential nonces on `MultisigProxy.execute` (plus a sequential `batchNonce` on `executeBatch`) for `FundsOut`. In addition, every `FundsOut` call carries the `burnId` extracted from the source-side burn consignment; the `Bridge` records consumed `burnId`s on-chain and rejects any future `FundsOut` referencing the same id.

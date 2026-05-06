@@ -12,7 +12,7 @@ import { ICommissionManager } from '../../src/interfaces/ICommissionManager.sol'
 ///
 /// Env:
 ///   PRIVATE_KEY, BRIDGE_ADDRESS, AMOUNT (wei),
-///   DESTINATION_CHAIN, DESTINATION_ADDRESS, OP_NONCE, TX_ID
+///   DESTINATION_CHAIN, DESTINATION_ADDRESS, OPERATION_ID
 contract BridgeFundsIn is Script {
     function run() external {
         uint256 pk           = vm.envUint('PRIVATE_KEY');
@@ -20,8 +20,7 @@ contract BridgeFundsIn is Script {
         uint256 amount       = vm.envUint('AMOUNT');
         string memory dChain = vm.envString('DESTINATION_CHAIN');
         string memory dAddr  = vm.envString('DESTINATION_ADDRESS');
-        uint256 opNonce      = vm.envUint('OP_NONCE');
-        uint256 txId         = vm.envUint('TX_ID');
+        uint256 operationId  = vm.envUint('OPERATION_ID');
 
         Bridge bridge = Bridge(bridgeAddr);
         address token = bridge.TOKEN();
@@ -35,7 +34,7 @@ contract BridgeFundsIn is Script {
 
         vm.startBroadcast(pk);
         IERC20(token).approve(bridgeAddr, amount);
-        bridge.fundsIn{ value: nativeCommission }(amount, dChain, dAddr, opNonce, txId);
+        bridge.fundsIn{ value: nativeCommission }(amount, dChain, dAddr, operationId);
         vm.stopBroadcast();
 
         console2.log('fundsIn succeeded. Bridge balance:', IERC20(token).balanceOf(bridgeAddr));

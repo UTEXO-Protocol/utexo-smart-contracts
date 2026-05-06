@@ -37,7 +37,7 @@ contract MultisigProxyTest is Test {
     event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
-    event TeeAllowedSelectorUpdated(bytes4 indexed selector, bool allowed);
+    event TeeAllowedCallUpdated(address indexed target, bytes4 indexed selector, bool allowed);
     event TimelockDurationUpdated(uint256 newDuration);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
 
@@ -82,7 +82,6 @@ contract MultisigProxyTest is Test {
     uint256 constant AMOUNT    = 100e18;
     uint256 constant TX_ID     = 42;
     uint256 constant BURN_ID   = 9_001;
-    uint256 constant NONCE_OP  = 7;
 
     // BtcRelay test data
     uint256 constant BLOCK_HEIGHT    = 850_000;
@@ -143,7 +142,7 @@ contract MultisigProxyTest is Test {
         vm.prank(user);
         token.approve(address(bridge), type(uint256).max);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT * 5, DST_CHAIN, DST_ADDR, NONCE_OP, TX_ID);
+        bridge.fundsIn(AMOUNT * 5, DST_CHAIN, DST_ADDR, TX_ID);
     }
 
     // ========================================================================
@@ -188,7 +187,7 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.commissionRecipient(), commissionReceiver);
         assertEq(proxy.timelockDuration(), TIMELOCK);
         assertEq(proxy.proposalNonce(), 0);
-        assertTrue(proxy.teeAllowedSelectors(FUNDS_OUT_SELECTOR));
+        assertTrue(proxy.teeAllowedCalls(address(bridge), FUNDS_OUT_SELECTOR));
 
         address[] memory enc = proxy.getEnclaveSigners();
         assertEq(enc.length, 3);
@@ -311,8 +310,145 @@ contract MultisigProxyTest is Test {
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        vm.expectRevert(IMultisigProxy.SelectorNotAllowed.selector);
+        vm.expectRevert(abi.encodeWithSelector(
+            IMultisigProxy.CallNotAllowed.selector, address(bridge), bytes4(callData)
+        ));
         proxy.execute(callData, nonce, deadline, bitmap, sigs);
+    }
+
+    // ========================================================================
+    // executeBatch
+    // ========================================================================
+
+    /// @dev Helper: build a single-element batch around the standard fundsOut call.
+    function _singleFundsOutBatch() internal view returns (
+        address[] memory targets,
+        bytes[]   memory callDatas,
+        uint256[] memory values
+    ) {
+        targets = new address[](1);
+        callDatas = new bytes[](1);
+        values = new uint256[](1);
+        targets[0]   = address(bridge);
+        callDatas[0] = _fundsOutCalldata();
+        values[0]    = 0;
+    }
+
+    function test_executeBatch_singleFundsOut_happyPath() public {
+        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
+
+        uint256 nonce    = proxy.batchNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
+            domainSep, targets, callDatas, values, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        proxy.executeBatch(targets, callDatas, values, nonce, deadline, bitmap, sigs);
+
+        assertEq(token.balanceOf(recipient), AMOUNT,    'fundsOut delivered');
+        assertEq(proxy.batchNonce(),         nonce + 1, 'batchNonce incremented');
+    }
+
+    function test_executeBatch_revertsOnEmpty() public {
+        address[] memory targets = new address[](0);
+        bytes[]   memory callDatas = new bytes[](0);
+        uint256[] memory values = new uint256[](0);
+
+        bytes[] memory sigs = new bytes[](2);
+
+        vm.expectRevert(IMultisigProxy.BatchEmpty.selector);
+        proxy.executeBatch(targets, callDatas, values, 0, block.timestamp + 1 hours, 0x3, sigs);
+    }
+
+    function test_executeBatch_revertsOnLengthMismatch() public {
+        address[] memory targets   = new address[](2);
+        bytes[]   memory callDatas = new bytes[](1);
+        uint256[] memory values    = new uint256[](2);
+        targets[0] = address(bridge); targets[1] = address(bridge);
+        callDatas[0] = _fundsOutCalldata();
+
+        bytes[] memory sigs = new bytes[](2);
+
+        vm.expectRevert(IMultisigProxy.BatchLengthMismatch.selector);
+        proxy.executeBatch(targets, callDatas, values, 0, block.timestamp + 1 hours, 0x3, sigs);
+    }
+
+    function test_executeBatch_revertsOnDisallowedTargetSelector() public {
+        // Disallowed target/selector pair: proxy.pause() (no allowlist entry).
+        address[] memory targets   = new address[](1);
+        bytes[]   memory callDatas = new bytes[](1);
+        uint256[] memory values    = new uint256[](1);
+        targets[0]   = makeAddr('random-target');
+        callDatas[0] = abi.encodeWithSignature('pause()');
+
+        uint256 nonce    = proxy.batchNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
+            domainSep, targets, callDatas, values, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(abi.encodeWithSelector(
+            IMultisigProxy.CallNotAllowed.selector, targets[0], bytes4(callDatas[0])
+        ));
+        proxy.executeBatch(targets, callDatas, values, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_executeBatch_revertsOnValueMismatch() public {
+        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
+        values[0] = 1 ether; // sum != msg.value (we pass 0)
+
+        uint256 nonce    = proxy.batchNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
+            domainSep, targets, callDatas, values, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.BatchValueMismatch.selector);
+        proxy.executeBatch{ value: 0 }(targets, callDatas, values, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_executeBatch_revertsOnTooLarge() public {
+        uint256 size = proxy.MAX_BATCH_SIZE() + 1;
+        address[] memory targets   = new address[](size);
+        bytes[]   memory callDatas = new bytes[](size);
+        uint256[] memory values    = new uint256[](size);
+
+        bytes[] memory sigs = new bytes[](2);
+        vm.expectRevert(IMultisigProxy.BatchTooLarge.selector);
+        proxy.executeBatch(targets, callDatas, values, 0, block.timestamp + 1 hours, 0x3, sigs);
+    }
+
+    function test_executeBatch_revertsOnExpired() public {
+        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
+
+        bytes[] memory sigs = new bytes[](2);
+        vm.expectRevert(IMultisigProxy.Expired.selector);
+        proxy.executeBatch(targets, callDatas, values, 0, block.timestamp - 1, 0x3, sigs);
+    }
+
+    function test_executeBatch_revertsOnWrongNonce() public {
+        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
+
+        uint256 wrongNonce = 99;
+        uint256 deadline   = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
+            domainSep, targets, callDatas, values, wrongNonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.executeBatch(targets, callDatas, values, wrongNonce, deadline, bitmap, sigs);
     }
 
     function test_execute_revertsOnCallDataTooShort() public {
@@ -520,27 +656,30 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Propose + Execute — SetTeeAllowedSelector
+    // Propose + Execute — SetTeeAllowedCall
     // ========================================================================
 
-    function test_proposeSetTeeAllowedSelector_execute() public {
-        bytes4 sel = bytes4(0xdeadbeef);
-        uint256 nonce = proxy.proposalNonce();
+    function test_proposeSetTeeAllowedCall_execute() public {
+        address target = makeAddr('lzAdapter');
+        bytes4  sel    = bytes4(0xdeadbeef);
+        uint256 nonce  = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
 
-        bytes32 digest = MultisigHelper.digestProposeSetTeeSelector(domainSep, sel, true, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeSetTeeAllowedCall(
+            domainSep, target, sel, true, nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        bytes32 id = proxy.proposeSetTeeAllowedSelector(sel, true, nonce, deadline, bitmap, sigs);
+        bytes32 id = proxy.proposeSetTeeAllowedCall(target, sel, true, nonce, deadline, bitmap, sigs);
 
         vm.warp(block.timestamp + TIMELOCK + 1);
 
-        vm.expectEmit(true, false, false, true);
-        emit TeeAllowedSelectorUpdated(sel, true);
+        vm.expectEmit(true, true, false, true);
+        emit TeeAllowedCallUpdated(target, sel, true);
 
-        proxy.executeProposal(id, abi.encode(sel, true));
-        assertTrue(proxy.teeAllowedSelectors(sel));
+        proxy.executeProposal(id, abi.encode(target, sel, true));
+        assertTrue(proxy.teeAllowedCalls(target, sel));
     }
 
     // ========================================================================
@@ -634,7 +773,7 @@ contract MultisigProxyTest is Test {
 
         uint256 depositAmount = 100e18;
         vm.prank(user);
-        bridge.fundsIn(depositAmount, DST_CHAIN, DST_ADDR, NONCE_OP + 1, TX_ID + 1);
+        bridge.fundsIn(depositAmount, DST_CHAIN, DST_ADDR, TX_ID + 1);
 
         uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
         assertEq(cm.tokenCommissionPool(address(token)), expectedCommission);

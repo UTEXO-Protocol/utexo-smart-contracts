@@ -12,5 +12,7 @@ broadcast/
 # Docs
 docs/
 
-# Dotenv file
+# Dotenv files — ignore all variants but keep templates committed
 .env
+.env.*
+!.env.*.example
