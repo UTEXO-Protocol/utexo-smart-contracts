@@ -43,9 +43,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///         storage + an immutable hash for quick equality checks if ever needed.
     string private _sourceChainName;
 
-    /// @notice On-chain record of fundsIn operations: transactionId => netAmount.
+    /// @notice On-chain record of fundsIn operations: operationId => netAmount.
     ///         Stores the amount actually bridged after token commission is deducted;
     ///         used by fundsOut to verify that referenced deposits actually happened.
+    ///         Records may be partially consumed by fundsOut — the residual stays
+    ///         under the same `operationId` until fully drained.
     mapping(uint256 => uint256) public fundsInRecords;
 
     /// @notice Set of burn identifiers already consumed by a successful `fundsOut`.
@@ -95,12 +97,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 amount,
         string  calldata destinationChain,
         string  calldata destinationAddress,
-        uint256 nonce,
-        uint256 transactionId
+        uint256 operationId
     ) external payable whenNotPaused nonReentrant {
         if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
         if (bytes(destinationChain).length == 0)   revert InvalidDestinationChain();
-        if (fundsInRecords[transactionId] != 0)    revert DuplicateTransactionId();
+        if (fundsInRecords[operationId] != 0)      revert DuplicateOperationId();
 
         // Quote commission for this route.
         (
@@ -120,8 +121,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // Pull the full gross amount from the user into this contract.
         IERC20(TOKEN).safeTransferFrom(_msgSender(), address(this), amount);
 
-        // Record the net amount as the bridged liquidity for this transaction.
-        fundsInRecords[transactionId] = netAmount;
+        // Record the net amount as the bridged liquidity for this operation.
+        fundsInRecords[operationId] = netAmount;
 
         // Forward token commission, if any, to the CommissionManager pool.
         if (tokenCommission != 0) {
@@ -135,11 +136,10 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             if (!ok) revert NativeValueMismatch();
         }
 
-        emit FundsIn(_msgSender(), transactionId, netAmount);
+        emit FundsIn(_msgSender(), operationId, netAmount);
         emit BridgeFundsIn(
             _msgSender(),
-            transactionId,
-            nonce,
+            operationId,
             amount,
             netAmount,
             tokenCommission,
@@ -157,7 +157,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     function fundsOut(
         address recipient,
         uint256 amount,
-        uint256 transactionId,
+        uint256 operationId,
         uint256 burnId,
         string  calldata sourceChain,
         string  calldata destChain,
@@ -174,15 +174,30 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (consumedBurnIds[burnId]) revert BurnIdAlreadyConsumed(burnId);
         consumedBurnIds[burnId] = true;
 
-        // Verify referenced fundsIn operations exist and consume them.
-        uint256 totalLocked;
+        // Verify referenced fundsIn operations exist and consume them — sequentially,
+        // partially when needed. Each record is either:
+        //   • fully consumed (deleted) if it is smaller than the remaining amount, or
+        //   • partially consumed (decremented) if it covers the remainder, leaving
+        //     a residual liquidity available for future fundsOut calls under the
+        //     same operationId.
+        uint256 remaining = amount;
         for (uint256 i = 0; i < fundsInIds.length; i++) {
             uint256 recorded = fundsInRecords[fundsInIds[i]];
             if (recorded == 0) revert FundsInNotFound(fundsInIds[i]);
-            totalLocked += recorded;
+
+            if (recorded > remaining) {
+                fundsInRecords[fundsInIds[i]] = recorded - remaining;
+                remaining = 0;
+                break;
+            }
+
+            // recorded <= remaining — consume the record fully.
             delete fundsInRecords[fundsInIds[i]];
+            remaining -= recorded;
+
+            if (remaining == 0) break;
         }
-        if (amount > totalLocked) revert FundsOutAmountExceedsFundsIn();
+        if (remaining != 0) revert FundsOutAmountExceedsFundsIn();
 
         // Verify Bitcoin block header is known to BtcRelay (reverts if unknown).
         IBtcRelayView(btcRelay).verifyBlockheaderHash(blockHeight, commitmentHash);
@@ -217,7 +232,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             amount,
             netAmount,
             tokenCommission,
-            transactionId,
+            operationId,
             burnId,
             sourceChain,
             destChain,

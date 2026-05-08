@@ -15,7 +15,7 @@ import { MultisigHelper } from '../../test/helpers/MultisigHelper.sol';
 ///   PROXY_ADDRESS           — MultisigProxy address
 ///   RECIPIENT               — destination address
 ///   AMOUNT (wei)            — gross amount to release (before commission)
-///   TX_ID                   — transaction id
+///   OPERATION_ID            — backend-assigned operation id
 ///   BURN_ID                 — burn consignment id (single-use replay guard)
 ///   SOURCE_CHAIN            — source chain string
 ///   DEST_CHAIN              — destination chain string (used for commission routing)
@@ -35,7 +35,7 @@ contract MultisigExecuteFundsOut is Script {
     struct Params {
         address recipient;
         uint256 amount;
-        uint256 txId;
+        uint256 operationId;
         uint256 burnId;
         string  srcChain;
         string  dstChain;
@@ -48,7 +48,7 @@ contract MultisigExecuteFundsOut is Script {
     function _loadParams() internal view returns (Params memory p) {
         p.recipient      = vm.envAddress('RECIPIENT');
         p.amount         = vm.envUint('AMOUNT');
-        p.txId           = vm.envUint('TX_ID');
+        p.operationId    = vm.envUint('OPERATION_ID');
         p.burnId         = vm.envUint('BURN_ID');
         p.srcChain       = vm.envString('SOURCE_CHAIN');
         p.dstChain       = vm.envString('DEST_CHAIN');
@@ -61,7 +61,7 @@ contract MultisigExecuteFundsOut is Script {
     function _buildCallData(Params memory p) internal pure returns (bytes memory) {
         return abi.encodeWithSelector(
             FUNDS_OUT_SELECTOR,
-            p.recipient, p.amount, p.txId, p.burnId,
+            p.recipient, p.amount, p.operationId, p.burnId,
             p.srcChain, p.dstChain, p.srcAddr,
             p.blockHeight, p.commitmentHash, p.fundsInIds
         );

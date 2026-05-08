@@ -29,18 +29,19 @@ Production bridge for UTEXO. Inherits `BridgeBase`, implements `IBridge`.
 
 Constructor takes four immutable addresses/values: the accepted ERC-20 token, the BtcRelay contract, the CommissionManager, and `sourceChainName` (this bridge's chain identifier as used in CommissionManager route keys, e.g. `"arbitrum"`).
 
-- `fundsIn(amount, destinationChain, destinationAddress, nonce, transactionId)` — open, **`payable`**. Quotes commission from `CommissionManager` using route key `(sourceChainName, destinationChain, TOKEN)`; if the route uses NATIVE currency, `msg.value` must equal the quoted native commission. Pulls the full `amount` in tokens from the sender, forwards any token/native commission to `CommissionManager`, and stores `transactionId => netAmount` in `fundsInRecords`. Emits two events:
+- `fundsIn(amount, destinationChain, destinationAddress, operationId)` — open, **`payable`**. Quotes commission from `CommissionManager` using route key `(sourceChainName, destinationChain, TOKEN)`; if the route uses NATIVE currency, `msg.value` must equal the quoted native commission. Pulls the full `amount` in tokens from the sender, forwards any token/native commission to `CommissionManager`, and stores `operationId => netAmount` in `fundsInRecords`. Emits two events:
   - `FundsIn` (from `BridgeBase`) — minimal, uses `netAmount`.
   - `BridgeFundsIn` (from `IBridge`) — full, consumed by the UTEXO backend.
-- `fundsOut(recipient, amount, transactionId, burnId, sourceChain, destChain, sourceAddress, blockHeight, commitmentHash, fundsInIds)` — `onlyOwner`, called via `MultisigProxy.execute()`. Checks `burnId` has not been consumed yet (single-use replay guard, marks it consumed before any external interaction), verifies referenced fundsIn operations exist on-chain (prevents double-spend and fake event attacks on TEE), verifies the Bitcoin block header via BtcRelay, quotes commission from `CommissionManager` using `(sourceChain, destChain, TOKEN)`, forwards any token commission to the pool, and releases `netAmount` to the recipient. Emits `BridgeFundsOut`. NATIVE commission on `fundsOut` is disallowed (the caller is the multisig, not a user) — the contract reverts `NativeCommissionNotAllowedOnFundsOut`.
+- `fundsOut(recipient, amount, operationId, burnId, sourceChain, destChain, sourceAddress, blockHeight, commitmentHash, fundsInIds)` — `onlyOwner`, called via `MultisigProxy.execute()` or `MultisigProxy.executeBatch()`. Checks `burnId` has not been consumed yet (single-use replay guard, marks it consumed before any external interaction), verifies referenced fundsIn operations exist on-chain (prevents double-spend and fake event attacks on TEE), verifies the Bitcoin block header via BtcRelay, quotes commission from `CommissionManager` using `(sourceChain, destChain, TOKEN)`, forwards any token commission to the pool, and releases `netAmount` to the recipient. Emits `BridgeFundsOut`. NATIVE commission on `fundsOut` is disallowed (the caller is the multisig, not a user) — the contract reverts `NativeCommissionNotAllowedOnFundsOut`.
 
-Owner **must** be `MultisigProxy`. `fundsOut` is only reachable through `MultisigProxy.execute()` which requires M-of-N TEE signatures.
+Owner **must** be `MultisigProxy`. `fundsOut` is only reachable through `MultisigProxy.execute()` (single-call) or `MultisigProxy.executeBatch()` (atomic multi-call, e.g. `Bridge.fundsOut` + `LZAdapter.sendOut` for outbound to non-Arbitrum), both of which require M-of-N TEE signatures.
 
 #### FundsIn records (double-spend protection)
 
-Every `fundsIn` stores `transactionId => netAmount` in the `fundsInRecords` mapping. During `fundsOut`, TEE supplies an array of `fundsInIds` referencing specific deposits. The contract verifies each ID exists, checks that `amount <= sum(referenced deposits)`, and deletes consumed records. This prevents:
+Every `fundsIn` stores `operationId => netAmount` in the `fundsInRecords` mapping. During `fundsOut`, TEE supplies an array of `fundsInIds` referencing specific deposits. The contract verifies each ID exists, then **partially consumes** them in order: full records are deleted; the last record on the chain is decremented if its remaining balance exceeds the requested `amount` so the surplus stays available for future `fundsOut` calls. This prevents:
 - **Fake event attacks:** a malicious node operator cannot feed fake `BridgeFundsIn` events to TEE — the contract is the source of truth.
-- **Double-spend:** each fundsIn record can only be consumed once.
+- **Double-spend:** every wei of net liquidity is referenced by exactly one record at all times.
+- **Liquidity loss:** partial consumption preserves the residual on the same `operationId` rather than discarding it.
 
 Note: records store the **net** amount (post-commission), i.e. the actual bridged liquidity. Gross amounts are available in the `BridgeFundsIn` event for backend bookkeeping.
 
@@ -66,7 +67,7 @@ Standalone fee contract. Holds protocol commissions separately from bridge liqui
 
 Owner of `Bridge` **and** `CommissionManager`. Two-level ECDSA M-of-N multisig:
 
-- **Enclave signers (TEE)** — authorize `execute()` calls (M-of-N, bitmap encoding). Used for `fundsOut`. Per-selector sequential nonces prevent replay.
+- **Enclave signers (TEE)** — authorize `execute()` (single-call) and `executeBatch()` (atomic multi-call) calls (M-of-N, bitmap encoding). Used for `fundsOut` (and outbound `LZAdapter.sendOut` paired in a batch). Per-selector sequential nonces prevent replay on `execute`; a sequential `batchNonce` does the same for `executeBatch`. The TEE allowlist is keyed on `(target, selector)` pairs (`teeAllowedCalls`), enabling atomic multi-target batches without granting TEE blanket admin power.
 - **Federation signers (governance)** — two-phase timelock for admin operations. Instant `emergencyPause` / `emergencyUnpause` bypass the timelock.
 
 Federation-controlled operations (`OperationType`):
@@ -78,7 +79,7 @@ Federation-controlled operations (`OperationType`):
 | `UpdateFederationSigners` | self | Rotate federation signer set / threshold |
 | `UpdateBridge` | self | Migrate to a redeployed Bridge |
 | `SetCommissionRecipient` | self | Change destination address for CM withdrawals |
-| `SetTeeAllowedSelector` | self | Add/remove a Bridge selector from the TEE allowlist |
+| `SetTeeAllowedCall` | self | Add/remove a `(target, selector)` pair from the TEE allowlist |
 | `SetTimelockDuration` | self | Adjust the timelock window |
 | `AdminExecuteCommissionManager` | CommissionManager | Generic call into CM (route rules, global defaults, mock rates, `transferOwnership`, …) |
 | `WithdrawTokenCommissionCM` | CommissionManager | Withdraw ERC-20 commission to `commissionRecipient` |
@@ -141,18 +142,39 @@ forge clean                              # delete out/ + cache/
 
 ## Environment
 
-Copy `.env.example` to `.env` and fill in the values for the scripts you intend to run. Key variables:
+Two separate templates — one per phase. Copy each to a real file and fill it in only when you actually need that flow:
 
+```sh
+cp .env.deploy.example   .env.deploy      # one-time, for deploy/upgrade
+cp .env.interact.example .env.interact    # day-to-day, for fundsIn / fundsOut sims
+```
+
+Foundry doesn't auto-load arbitrary names — load the file you need before running:
+
+```sh
+set -a && source .env.deploy   && set +a   # before deploy scripts
+set -a && source .env.interact && set +a   # before interact scripts
+```
+
+**Key deploy variables** (`.env.deploy`):
 - `USDT0_ADDRESS` — accepted ERC-20 token
 - `BTC_RELAY_ADDRESS` — Atomiq BtcRelay contract address
 - `SOURCE_CHAIN_NAME` — this bridge's chain id used by `CommissionManager` route keys (e.g. `"arbitrum"`)
-- `COMMISSION_MANAGER` — `CommissionManager` address (for step-by-step deploy and interact scripts)
-- `COMMISSION_RECIPIENT` — destination for CM withdrawals (set at `MultisigProxy` deployment, changeable via `SetCommissionRecipient`)
+- `COMMISSION_MANAGER` — `CommissionManager` address (step-by-step deploys only)
+- `COMMISSION_RECIPIENT` — destination for CM withdrawals
+- `ENCLAVE_SIGNERS` / `FEDERATION_SIGNERS` — comma-separated addresses, ordered by bitmap bit index
+- `TIMELOCK_DURATION` — federation timelock window in seconds
+
+**Key interact variables** (`.env.interact`):
+- `BRIDGE_ADDRESS`, `PROXY_ADDRESS`, `BASE_BRIDGE_ADDRESS` — deployed contracts
+- `OPERATION_ID` — backend-assigned operation id (replay guard)
+- `BURN_ID`, `BLOCK_HEIGHT`, `COMMITMENT_HASH`, `FUNDS_IN_IDS` — fundsOut-only inputs
 - `DEST_CHAIN` — destination chain string used by `MultisigExecuteFundsOut.s.sol` when building calldata
+- `ENCLAVE_PKS` / `FED_PKS` — comma-separated private keys for local TEE/federation simulation
 
 ## Deployment
 
-All deploy scripts live in `script/deploy/`. They read their inputs from `.env`.
+All deploy scripts live in `script/deploy/`. They read their inputs from `.env.deploy`.
 
 ### Option A — Full production (CM + Bridge + MultisigProxy + ownership transfer)
 
@@ -188,7 +210,7 @@ Deploys `BaseBridge` with `TOKEN_ADDRESS`. The deployer becomes the initial owne
 
 ## Interaction scripts
 
-Scripts in `script/interact/` let you exercise contracts manually before the backend is wired up. All read inputs from `.env`.
+Scripts in `script/interact/` let you exercise contracts manually before the backend is wired up. All read inputs from `.env.interact`.
 
 | Script | What it does |
 |---|---|
@@ -205,7 +227,7 @@ Example:
 forge script script/interact/BridgeFundsIn.s.sol --rpc-url $RPC_URL --broadcast
 ```
 
-> **Security note:** `MultisigExecuteFundsOut` signs with local private keys from `.env`. Only use for testnet and local end-to-end checks. In production, TEE enclaves produce signatures; this script just simulates that flow.
+> **Security note:** `MultisigExecuteFundsOut` signs with local private keys from `.env.interact`. Only use for testnet and local end-to-end checks. In production, TEE enclaves produce signatures; this script just simulates that flow.
 
 ## Post-deployment checklist
 
@@ -216,7 +238,7 @@ forge script script/interact/BridgeFundsIn.s.sol --rpc-url $RPC_URL --broadcast
 5. Verify source chain name: `Bridge.sourceChainName()` matches the expected `SOURCE_CHAIN_NAME`.
 6. Verify enclave signers: `MultisigProxy.getEnclaveSigners()` returns the TEE addresses.
 7. Verify federation signers: `MultisigProxy.getFederationSigners()` returns the governance addresses.
-8. Verify TEE-allowed selector: `MultisigProxy.teeAllowedSelectors(fundsOutSelector)` returns `true` (selector for the 10-arg `fundsOut` signature with `destChain` and `burnId`).
+8. Verify TEE-allowed call: `MultisigProxy.teeAllowedCalls(bridgeAddress, fundsOutSelector)` returns `true` (selector for the 10-arg `fundsOut` signature with `destChain` and `burnId`).
 9. Test `fundsIn` with a small amount (zero commission by default) to confirm token transfer and event emission.
 
 ## Project structure
@@ -253,5 +275,6 @@ test/
 
 lib/                          — Foundry submodules (forge-std, openzeppelin-contracts)
 foundry.toml                  — Foundry configuration
-.env.example                  — Environment template
+.env.deploy.example           — Deploy environment template
+.env.interact.example         — Interaction environment template
 ```

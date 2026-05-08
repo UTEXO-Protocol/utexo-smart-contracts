@@ -75,7 +75,6 @@ contract IntegrationTest is Test {
     uint256 constant TX_ID_IN   = 42;
     uint256 constant TX_ID_OUT  = 43;
     uint256 constant BURN_ID    = 9_001;
-    uint256 constant USER_NONCE = 7;
 
     uint256 constant BLOCK_HEIGHT      = 850_000;
     bytes32 constant COMMITMENT_HASH   = keccak256('integration-btc-block');
@@ -96,7 +95,7 @@ contract IntegrationTest is Test {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 transactionId,
+        uint256 operationId,
         uint256 burnId,
         string  sourceChain,
         string  destChain,
@@ -215,7 +214,6 @@ contract IntegrationTest is Test {
             USER_DEPOSIT,
             RGB_CHAIN,
             'rgb:asset1qp0y3mq/utxo1abc',
-            USER_NONCE,
             TX_ID_IN
         );
 
@@ -366,7 +364,6 @@ contract IntegrationTest is Test {
             USER_DEPOSIT,
             RGB_CHAIN,
             'rgb:asset1qp0y3mq/utxo1abc',
-            USER_NONCE,
             TX_ID_IN
         );
 
