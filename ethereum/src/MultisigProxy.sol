@@ -56,6 +56,11 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Hard upper bound on `executeBatch` size to keep gas use bounded.
     uint256 public constant MAX_BATCH_SIZE = 3;
 
+    /// @notice Length of a Solidity function selector (`bytes4`) in bytes. Used
+    ///         to guard `callData` against payloads too short to even carry a
+    ///         selector before it is sliced via `calldataload`.
+    uint256 public constant SELECTOR_LENGTH = 4;
+
     bytes32 public immutable DOMAIN_SEPARATOR;
 
     bytes32 private constant _DOMAIN_TYPEHASH = keccak256(
@@ -194,7 +199,7 @@ contract MultisigProxy is IMultisigProxy {
         bytes[] calldata enclaveSigs
     ) external {
         if (block.timestamp > deadline) revert Expired();
-        if (callData.length < 4) revert CallDataTooShort();
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
@@ -234,7 +239,7 @@ contract MultisigProxy is IMultisigProxy {
         bytes4[] memory selectors = new bytes4[](n);
         uint256 totalValue;
         for (uint256 i = 0; i < n; i++) {
-            if (callDatas[i].length < 4) revert CallDataTooShort();
+            if (callDatas[i].length < SELECTOR_LENGTH) revert CallDataTooShort();
 
             bytes calldata cd = callDatas[i];
             bytes4 sel;
@@ -324,7 +329,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        if (callData.length < 4) revert CallDataTooShort();
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
@@ -470,7 +475,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        if (callData.length < 4) revert CallDataTooShort();
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
@@ -556,7 +561,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        if (callData.length < 4) revert CallDataTooShort();
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
