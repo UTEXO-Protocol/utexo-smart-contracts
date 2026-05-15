@@ -15,10 +15,11 @@ import { MultisigProxy } from '../../src/MultisigProxy.sol';
 ///           5. Transfer Bridge and CommissionManager ownership to MultisigProxy.
 ///
 /// Env:
-///   PRIVATE_KEY, USDT0_ADDRESS, BTC_RELAY_ADDRESS, SOURCE_CHAIN_NAME,
+///   PRIVATE_KEY, USDT0_ADDRESS, BTC_RELAY_ADDRESS,
 ///   ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD,
 ///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD,
 ///   COMMISSION_RECIPIENT, TIMELOCK_DURATION
+///
 ///
 /// Usage:
 ///   forge script script/deploy/DeployAll.s.sol \
@@ -31,7 +32,6 @@ contract DeployAll is Script {
         uint256 pk             = vm.envUint('PRIVATE_KEY');
         address usdt0          = vm.envAddress('USDT0_ADDRESS');
         address btcRelay       = vm.envAddress('BTC_RELAY_ADDRESS');
-        string memory srcChain = vm.envString('SOURCE_CHAIN_NAME');
         address[] memory enc   = vm.envAddress('ENCLAVE_SIGNERS', ',');
         uint256 encThr         = vm.envUint('ENCLAVE_THRESHOLD');
         address[] memory fed   = vm.envAddress('FEDERATION_SIGNERS', ',');
@@ -53,7 +53,7 @@ contract DeployAll is Script {
         vm.startBroadcast(pk);
 
         cm     = new CommissionManager(predictedBridge);
-        bridge = new Bridge(usdt0, btcRelay, payable(address(cm)), srcChain);
+        bridge = new Bridge(usdt0, btcRelay, payable(address(cm)), address(0));
         proxy  = new MultisigProxy(
             address(bridge),
             address(cm),

@@ -14,6 +14,11 @@ contract MultisigProxy is IMultisigProxy {
     address public bridge;
     address public commissionManager;
 
+    /// @notice Routing target for `AdminExecuteAdapter` proposals. Settable via
+    ///         `UpdateLZAdapter` after the adapter is deployed; `address(0)`
+    ///         until then (closes adapter-execute by default).
+    address public lzAdapter;
+
     address[] private _enclaveSigners;
     uint256 public enclaveThreshold;
 
@@ -50,6 +55,11 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @notice Hard upper bound on `executeBatch` size to keep gas use bounded.
     uint256 public constant MAX_BATCH_SIZE = 3;
+
+    /// @notice Length of a Solidity function selector (`bytes4`) in bytes. Used
+    ///         to guard `callData` against payloads too short to even carry a
+    ///         selector before it is sliced via `calldataload`.
+    uint256 public constant SELECTOR_LENGTH = 4;
 
     bytes32 public immutable DOMAIN_SEPARATOR;
 
@@ -100,6 +110,14 @@ contract MultisigProxy is IMultisigProxy {
     );
     bytes32 private constant _PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH = keccak256(
         'ProposeUpdateCommissionManager(address newCommissionManager,uint256 nonce,uint256 deadline)'
+    );
+
+    // Federation propose — LZAdapter side
+    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH = keccak256(
+        'ProposeAdminExecuteAdapter(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH = keccak256(
+        'ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)'
     );
 
     // Cancel
@@ -155,7 +173,7 @@ contract MultisigProxy is IMultisigProxy {
         // federation governance through `proposeSetTeeAllowedCall`.
         teeAllowedCalls[bridge_][
             bytes4(keccak256(
-                'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+                'fundsOut(address,uint256,uint256,uint256,uint256,uint256,string,uint256,bytes32,uint256[])'
             ))
         ] = true;
 
@@ -181,7 +199,7 @@ contract MultisigProxy is IMultisigProxy {
         bytes[] calldata enclaveSigs
     ) external {
         if (block.timestamp > deadline) revert Expired();
-        if (callData.length < 4) revert CallDataTooShort();
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
@@ -221,7 +239,7 @@ contract MultisigProxy is IMultisigProxy {
         bytes4[] memory selectors = new bytes4[](n);
         uint256 totalValue;
         for (uint256 i = 0; i < n; i++) {
-            if (callDatas[i].length < 4) revert CallDataTooShort();
+            if (callDatas[i].length < SELECTOR_LENGTH) revert CallDataTooShort();
 
             bytes calldata cd = callDatas[i];
             bytes4 sel;
@@ -311,7 +329,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        if (callData.length < 4) revert CallDataTooShort();
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
@@ -457,7 +475,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        if (callData.length < 4) revert CallDataTooShort();
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
@@ -527,6 +545,53 @@ contract MultisigProxy is IMultisigProxy {
         return _propose(
             OperationType.UpdateCommissionManager,
             abi.encode(newCommissionManager),
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    // =========================================================================
+    // Federation propose (Phase 1) — LZAdapter side
+    // =========================================================================
+
+    /// @inheritdoc IMultisigProxy
+    function proposeAdminExecuteAdapter(
+        bytes calldata callData,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
+
+        bytes4 selector;
+        assembly { selector := calldataload(callData.offset) }
+
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, selector, keccak256(callData), nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.AdminExecuteAdapter,
+            callData,
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeUpdateLZAdapter(
+        address newLZAdapter,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH, newLZAdapter, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.UpdateLZAdapter,
+            abi.encode(newLZAdapter),
             nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
@@ -743,6 +808,19 @@ contract MultisigProxy is IMultisigProxy {
             address old = commissionManager;
             commissionManager = newCm;
             emit CommissionManagerUpdated(old, newCm);
+
+        } else if (opType == OperationType.AdminExecuteAdapter) {
+            // opData = raw LZAdapter callData. The adapter must be wired in
+            // first via UpdateLZAdapter; a zero target closes the path.
+            if (lzAdapter == address(0)) revert ZeroTarget();
+            (bool ok, bytes memory ret) = lzAdapter.call(opData);
+            _propagateRevert(ok, ret);
+
+        } else if (opType == OperationType.UpdateLZAdapter) {
+            address newAdapter = abi.decode(opData, (address));
+            address oldAdapter = lzAdapter;
+            lzAdapter = newAdapter;
+            emit LZAdapterUpdated(oldAdapter, newAdapter);
 
         } else {
             revert UnknownOperationType();
