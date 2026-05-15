@@ -7,6 +7,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+
 import {
     CommissionConfig,
     CommissionCurrency,
@@ -28,7 +30,11 @@ import {
  *      **Side (`CommissionSide`):** For a given route config, commission applies only to **either**
  *      `FUNDS_IN` **or** `FUNDS_OUT`, matching `calculateFundsInCommission` vs `calculateFundsOutCommission`.
  *      **Currency (`CommissionCurrency`):** `TOKEN` deducts fee from the bridged amount; `NATIVE` expresses
- *      fee in native wei using owner-set **mock** rates and `IERC20Metadata.decimals()` on `token`.
+ *      fee in native wei. NATIVE quoting reads ETH/USD from a Chainlink price feed (`ethUsdFeed`) and
+ *      assumes the bridged token is a USD-pegged stablecoin (1 token unit ≈ $1) — the bridge currently
+ *      only supports USDT0, so a single ETH/USD feed is sufficient and we avoid trusting a USDT/USD feed
+ *      whose error margin would be negligible against the fee itself. Stale answers (older than
+ *      `ethUsdHeartbeat`) and non-positive answers revert the call.
  *
  *      **Roles:** `bridgeAddress` may call `receiveTokenCommission` and `receive()` to credit fees;
  *      `owner` configures rules and withdraws accumulated pools. `renounceOwnership` is disabled.
@@ -62,10 +68,13 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
     /// @notice Accrued native commission in wei.
     uint256 public nativeCommissionPool;
 
-    /// @notice Global mock wei-per-token rate for NATIVE conversion if per-token mock is unset.
-    uint256 public mockTokenToNativeRate;
-    /// @notice Per-token mock rate; zero means use `mockTokenToNativeRate`.
-    mapping(address => uint256) public mockTokenToNativeRateForToken;
+    /// @notice Chainlink ETH/USD aggregator used to quote NATIVE commissions.
+    ///         `address(0)` (default after deploy) closes the NATIVE path until
+    ///         federation governance wires a real feed via `setEthUsdFeed`.
+    address public ethUsdFeed;
+    /// @notice Maximum allowed staleness of `ethUsdFeed.latestRoundData().updatedAt`
+    ///         in seconds. Quotes revert `StalePrice` when the answer is older.
+    uint256 public ethUsdHeartbeat;
 
     // ============ Modifiers ============
 
@@ -107,7 +116,7 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
      * @return nativeCommission Fee in wei (0 if not `NATIVE` currency).
      * @return netAmount Amount after fee if `TOKEN`; full `amount` if `NATIVE` (fee paid separately in native).
      * @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_IN`. NATIVE path uses
-     *      `resolvedMockTokenToNativeRate` and `IERC20Metadata(token).decimals()`.
+     *      `convertTokenFeeToNative` (Chainlink ETH/USD) and `IERC20Metadata(token).decimals()`.
      */
     function calculateFundsInCommission(
         uint256 sourceChainId,
@@ -145,11 +154,8 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
             if (stableFee == 0) {
                 nativeCommission = 0;
             } else {
-                uint256 rate = resolvedMockTokenToNativeRate(token);
-                if (rate == 0) revert MockTokenToNativeRateNotSet();
-                nativeCommission = convertTokenToNative(
+                nativeCommission = convertTokenFeeToNative(
                     stableFee,
-                    rate,
                     _tokenDecimals(token)
                 );
             }
@@ -205,11 +211,8 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
             if (stableFee == 0) {
                 nativeCommission = 0;
             } else {
-                uint256 rate = resolvedMockTokenToNativeRate(token);
-                if (rate == 0) revert MockTokenToNativeRateNotSet();
-                nativeCommission = convertTokenToNative(
+                nativeCommission = convertTokenFeeToNative(
                     stableFee,
-                    rate,
                     _tokenDecimals(token)
                 );
             }
@@ -232,30 +235,30 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
         return (amount * stablePercent) / multiplier / multiplier;
     }
 
-    /**
-     * @notice Convert a token-denominated fee to native wei (blueprint `convertTokenToNative`).
-     * @param tokenFee Fee in token smallest units.
-     * @param rateWeiPerTokenUnit Mock rate: wei per 10**`tokenDecimals` token units.
-     * @param tokenDecimals Token decimals (e.g. 18).
-     * @return nativeFee Equivalent native amount in wei.
-     */
-    function convertTokenToNative(
+    /// @inheritdoc ICommissionManager
+    /// @dev Assumes the token is a USD-pegged stablecoin (1 token unit ≈ $1).
+    ///      Math:
+    ///         tokenFee  is in 10^tokenDecimals units (USD value 1:1)
+    ///         price     = ETH/USD scaled by 10^feedDecimals
+    ///         nativeFee = (tokenFee_usd / price_usd_per_eth) * 10^18
+    ///                   = tokenFee * 10^(18 - tokenDecimals + feedDecimals) / price
+    function convertTokenFeeToNative(
         uint256 tokenFee,
-        uint256 rateWeiPerTokenUnit,
         uint256 tokenDecimals
-    ) public pure returns (uint256 nativeFee) {
-        nativeFee = (tokenFee * rateWeiPerTokenUnit) / (10 ** tokenDecimals);
-    }
+    ) public view returns (uint256 nativeFee) {
+        if (tokenFee == 0) return 0;
+        if (tokenDecimals > 18) revert TokenDecimalsTooLarge();
 
-    /**
-     * @notice Effective mock wei-per-token rate: per-token if non-zero, else global.
-     * @param token ERC-20 token (used with decimals in commission math).
-     * @return rate Wei-per-token-unit rate for `convertTokenToNative`.
-     */
-    function resolvedMockTokenToNativeRate(address token) public view returns (uint256) {
-        uint256 r = mockTokenToNativeRateForToken[token];
-        if (r != 0) return r;
-        return mockTokenToNativeRate;
+        address feedAddr = ethUsdFeed;
+        if (feedAddr == address(0)) revert EthUsdFeedNotSet();
+        AggregatorV3Interface feed = AggregatorV3Interface(feedAddr);
+
+        (, int256 answer, , uint256 updatedAt, ) = feed.latestRoundData();
+        if (answer <= 0) revert InvalidPrice();
+        if (block.timestamp - updatedAt > ethUsdHeartbeat) revert StalePrice();
+
+        uint256 scale = 10 ** (18 - tokenDecimals + uint256(feed.decimals()));
+        nativeFee = (tokenFee * scale) / uint256(answer);
     }
 
     /**
@@ -298,24 +301,24 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
         emit GlobalDefaultsUpdated(stablePercent, multiplier, side, currency);
     }
 
-    /**
-     * @notice Sets `mockTokenToNativeRate` (fallback when per-token mock is zero).
-     * @param rate Wei-per-token-unit rate for `convertTokenToNative`.
-     */
-    function setMockTokenToNativeRate(uint256 rate) external onlyOwner {
-        mockTokenToNativeRate = rate;
-        emit MockTokenToNativeRateUpdated(rate);
-    }
-
-    /**
-     * @notice Sets or clears per-token mock rate for NATIVE commission quotes.
-     * @param token ERC-20 token (non-zero).
-     * @param rate Mock rate; 0 clears override so global `mockTokenToNativeRate` applies.
-     */
-    function setMockTokenToNativeRateForToken(address token, uint256 rate) external onlyOwner {
-        if (token == address(0)) revert InvalidToken();
-        mockTokenToNativeRateForToken[token] = rate;
-        emit MockTokenToNativeRateForTokenUpdated(token, rate);
+    /// @inheritdoc ICommissionManager
+    /// @dev Set `feed == address(0)` to disable the NATIVE path entirely
+    ///      (all subsequent NATIVE quotes revert `EthUsdFeedNotSet`). When a
+    ///      non-zero `feed` is supplied `heartbeat` must be non-zero; a sensible
+    ///      value is the feed's published heartbeat plus a small buffer.
+    function setEthUsdFeed(address feed, uint256 heartbeat) external onlyOwner {
+        if (feed == address(0)) {
+            // Closing the path — ignore any provided heartbeat to keep the
+            // off-state self-consistent.
+            ethUsdFeed = address(0);
+            ethUsdHeartbeat = 0;
+            emit EthUsdFeedUpdated(address(0), 0);
+            return;
+        }
+        if (heartbeat == 0) revert InvalidHeartbeat();
+        ethUsdFeed = feed;
+        ethUsdHeartbeat = heartbeat;
+        emit EthUsdFeedUpdated(feed, heartbeat);
     }
 
     /**

@@ -46,7 +46,6 @@ interface ICommissionManager {
     error InvalidRecipient();
     error StablePercentTooHigh();
     error MultiplierZero();
-    error MockTokenToNativeRateNotSet();
     error TokenDecimalsUnavailable();
     error BalanceBelowRecordedPool();
     error NothingReceived();
@@ -55,6 +54,14 @@ interface ICommissionManager {
     error NativeTransferFailed();
     error NoBalance();
     error RenounceOwnershipBlocked();
+
+    // --- Chainlink-related ---
+    error InvalidEthUsdFeed();
+    error EthUsdFeedNotSet();
+    error InvalidPrice();
+    error StalePrice();
+    error TokenDecimalsTooLarge();
+    error InvalidHeartbeat();
 
     // ============ Events ============
 
@@ -83,8 +90,7 @@ interface ICommissionManager {
     event TokenCommissionReceived(address indexed token, uint256 amount);
     event NativeCommissionReceived(uint256 amount);
 
-    event MockTokenToNativeRateUpdated(uint256 rate);
-    event MockTokenToNativeRateForTokenUpdated(address indexed token, uint256 rate);
+    event EthUsdFeedUpdated(address indexed feed, uint256 heartbeat);
 
     event TokenCommissionWithdrawn(
         address indexed token,
@@ -109,9 +115,9 @@ interface ICommissionManager {
 
     function nativeCommissionPool() external view returns (uint256);
 
-    function mockTokenToNativeRate() external view returns (uint256);
+    function ethUsdFeed() external view returns (address);
 
-    function mockTokenToNativeRateForToken(address token) external view returns (uint256);
+    function ethUsdHeartbeat() external view returns (uint256);
 
     // ============ Core calculations ============
 
@@ -141,13 +147,15 @@ interface ICommissionManager {
         uint256 multiplier
     ) external pure returns (uint256);
 
-    function convertTokenToNative(
+    /// @notice Convert a USD-denominated token fee (stablecoin, 1 token ≈ $1) to
+    ///         native wei using the configured ETH/USD Chainlink feed. Reverts
+    ///         `EthUsdFeedNotSet` when the feed is unconfigured, `InvalidPrice`
+    ///         on non-positive answers, and `StalePrice` when `updatedAt` is
+    ///         older than the configured heartbeat.
+    function convertTokenFeeToNative(
         uint256 tokenFee,
-        uint256 rateWeiPerTokenUnit,
         uint256 tokenDecimals
-    ) external pure returns (uint256 nativeFee);
-
-    function resolvedMockTokenToNativeRate(address token) external view returns (uint256);
+    ) external view returns (uint256 nativeFee);
 
     // ============ Admin / config ============
 
@@ -158,9 +166,13 @@ interface ICommissionManager {
         CommissionCurrency currency
     ) external;
 
-    function setMockTokenToNativeRate(uint256 rate) external;
-
-    function setMockTokenToNativeRateForToken(address token, uint256 rate) external;
+    /// @notice Configure (or rotate) the ETH/USD Chainlink price feed used for
+    ///         NATIVE-currency commission quotes. `heartbeat` is the maximum
+    ///         allowed staleness in seconds before `calculate*Commission` reverts
+    ///         (Chainlink ETH/USD on Arbitrum heartbeats at 86400 s; a sensible
+    ///         setting is ~90000 with a safety buffer). Pass `address(0)` to
+    ///         disable NATIVE quoting until a new feed is set.
+    function setEthUsdFeed(address feed, uint256 heartbeat) external;
 
     function setCommissionRule(
         uint256 sourceChainId,
