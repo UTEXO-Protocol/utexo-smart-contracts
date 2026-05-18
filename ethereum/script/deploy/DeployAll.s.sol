@@ -20,6 +20,15 @@ import { MultisigProxy } from '../../src/MultisigProxy.sol';
 ///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD,
 ///   COMMISSION_RECIPIENT, TIMELOCK_DURATION
 ///
+///   ETH_USD_FEED      — Optional Chainlink ETH/USD aggregator address. When
+///                       supplied (non-zero) together with `ETH_USD_HEARTBEAT`
+///                       it is wired in *before* CM ownership transfer, so the
+///                       NATIVE-currency commission path is live the moment the
+///                       proxy takes over. If omitted, NATIVE commission quotes
+///                       revert `EthUsdFeedNotSet` until federation runs
+///                       `proposeAdminExecuteCM(setEthUsdFeed(feed, hb))`.
+///   ETH_USD_HEARTBEAT — Seconds before the feed answer is considered stale.
+///
 ///
 /// Usage:
 ///   forge script script/deploy/DeployAll.s.sol \
@@ -38,6 +47,8 @@ contract DeployAll is Script {
         uint256 fedThr         = vm.envUint('FEDERATION_THRESHOLD');
         address commission     = vm.envAddress('COMMISSION_RECIPIENT');
         uint256 timelock       = vm.envUint('TIMELOCK_DURATION');
+        address ethUsdFeed     = vm.envOr('ETH_USD_FEED', address(0));
+        uint256 ethUsdHb       = vm.envOr('ETH_USD_HEARTBEAT', uint256(0));
 
         address deployer = vm.addr(pk);
         uint64 currentNonce = vm.getNonce(deployer);
@@ -46,8 +57,9 @@ contract DeployAll is Script {
         //   nonce  n   → CommissionManager
         //   nonce n+1  → Bridge
         //   nonce n+2  → MultisigProxy
-        //   nonce n+3  → CommissionManager.transferOwnership
-        //   nonce n+4  → Bridge.transferOwnership
+        //   nonce n+3  → (optional) CommissionManager.setEthUsdFeed
+        //   nonce n+4  → CommissionManager.transferOwnership
+        //   nonce n+5  → Bridge.transferOwnership
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 1);
 
         vm.startBroadcast(pk);
@@ -63,6 +75,14 @@ contract DeployAll is Script {
             timelock
         );
 
+        // Wire the Chainlink feed *before* the proxy takes over. After
+        // ownership transfer the only way to change it is via federation
+        // governance (`proposeAdminExecuteCM(setEthUsdFeed)`).
+        if (ethUsdFeed != address(0)) {
+            require(ethUsdHb != 0, 'ETH_USD_HEARTBEAT must be set when ETH_USD_FEED is provided');
+            cm.setEthUsdFeed(ethUsdFeed, ethUsdHb);
+        }
+
         cm.transferOwnership(address(proxy));
         bridge.transferOwnership(address(proxy));
 
@@ -71,10 +91,20 @@ contract DeployAll is Script {
         console2.log('CommissionManager deployed at:', address(cm));
         console2.log('Bridge deployed at:           ', address(bridge));
         console2.log('MultisigProxy deployed at:    ', address(proxy));
+        if (ethUsdFeed != address(0)) {
+            console2.log('ETH/USD feed wired:           ', ethUsdFeed);
+            console2.log('ETH/USD heartbeat (s):        ', ethUsdHb);
+        } else {
+            console2.log('ETH/USD feed:                 ', 'UNSET (NATIVE quotes will revert until governance wires one)');
+        }
 
         require(address(bridge) == predictedBridge, 'Bridge address prediction mismatch');
         require(cm.bridgeAddress() == address(bridge), 'CM.bridgeAddress mismatch');
         require(bridge.owner() == address(proxy), 'Bridge ownership transfer failed');
         require(cm.owner()     == address(proxy), 'CM ownership transfer failed');
+        if (ethUsdFeed != address(0)) {
+            require(cm.ethUsdFeed() == ethUsdFeed, 'CM.ethUsdFeed mismatch');
+            require(cm.ethUsdHeartbeat() == ethUsdHb, 'CM.ethUsdHeartbeat mismatch');
+        }
     }
 }
