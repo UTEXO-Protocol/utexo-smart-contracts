@@ -40,7 +40,11 @@ contract BridgeFundsIn is Script {
 
         vm.startBroadcast(pk);
         IERC20(token).approve(bridgeAddr, amount);
-        bridge.fundsIn{ value: nativeCommission }(amount, destChainId, dAddr, operationId);
+        // TODO: settlementData is currently empty (RGB-route settlement
+        // module needs no extra data on fundsIn). When other routes register
+        // modules that consume settlementData on the inbound path, this
+        // script must source the blob from env.
+        bridge.fundsIn{ value: nativeCommission }(amount, destChainId, dAddr, operationId, '');
         vm.stopBroadcast();
 
         console2.log('fundsIn succeeded. Bridge balance:', IERC20(token).balanceOf(bridgeAddr));

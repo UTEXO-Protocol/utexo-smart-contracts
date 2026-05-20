@@ -40,7 +40,11 @@ contract DeployAll is Script {
     {
         uint256 pk             = vm.envUint('PRIVATE_KEY');
         address usdt0          = vm.envAddress('USDT0_ADDRESS');
-        address btcRelay       = vm.envAddress('BTC_RELAY_ADDRESS');
+        // TODO: rewrite the full deploy graph — RouteRegistry must be
+        // deployed before Bridge with Bridge's predicted address as its
+        // `bridge_` immutable. This temporary env var lets the script compile
+        // until PR7 reshapes the deployment order.
+        address routeRegistry  = vm.envAddress('ROUTE_REGISTRY_ADDRESS');
         address[] memory enc   = vm.envAddress('ENCLAVE_SIGNERS', ',');
         uint256 encThr         = vm.envUint('ENCLAVE_THRESHOLD');
         address[] memory fed   = vm.envAddress('FEDERATION_SIGNERS', ',');
@@ -65,7 +69,7 @@ contract DeployAll is Script {
         vm.startBroadcast(pk);
 
         cm     = new CommissionManager(predictedBridge);
-        bridge = new Bridge(usdt0, btcRelay, payable(address(cm)), address(0));
+        bridge = new Bridge(usdt0, routeRegistry, payable(address(cm)), address(0));
         proxy  = new MultisigProxy(
             address(bridge),
             address(cm),
