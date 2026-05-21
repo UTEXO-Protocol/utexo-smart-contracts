@@ -13,9 +13,12 @@ import { Bridge } from '../../src/Bridge.sol';
 ///   PRIVATE_KEY               — deployer private key
 ///   USDT0_ADDRESS             — accepted ERC-20 token
 ///   ROUTE_REGISTRY_ADDRESS    — RouteRegistry contract paired with this Bridge.
-///                               FIXME(PR7): full deploy flow rewrite — registry
-///                               must be deployed before Bridge with Bridge's
-///                               predicted address as its `bridge_` immutable.
+///                               For a fresh stack use `DeployAll.s.sol` — it
+///                               predicts Bridge's CREATE address and wires the
+///                               registry's `bridge_` immutable to it in the
+///                               same transaction batch. Standalone deploy is
+///                               for replacing Bridge while keeping the
+///                               existing registry (rare).
 ///   COMMISSION_MANAGER        — CommissionManager contract (must already be deployed)
 ///   LZ_ADAPTER                — Optional initial LayerZero adapter address;
 ///                               omit or pass `0x0` if the adapter has not been
